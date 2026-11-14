@@ -531,6 +531,20 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     assert(app.includes("function chunksOf"));
     assert(app.includes("正在删除账号…"));
     assert(app.includes("BATCH_CHUNK"));
+    // 每个按钮都要有 loading：统一走 withOp，且短请求也要亮够时间，
+    // 否则几十毫秒就回来的操作看起来还是「点了没反应」。
+    assert(app.includes("async function withOp"));
+    assert(app.includes("OP_MIN_MS"));
+    // 禁用要能还原，不然「刷新列表」点一次就永久变灰
+    assert(app.includes("wasDisabled"));
+    // 行内按钮跟着 poolBusy 走：列表是在 poolBusy=true 时渲染的
+    assert(app.includes(".row-act"));
+    // 服务重启时端口不监听，fetch 直接 reject，等它起来而不是让用户重开页面
+    assert(app.includes("function wakeService"));
+    assert(app.includes("WAKE_DELAYS"));
+    assert(!app.includes("无法连接本地导入服务"), "重启窗口不该让用户重开页面");
+    // 写请求不自动重试：失败原因拿不到，重发有重复提交风险
+    assert(app.includes("data === undefined && await wakeService()"));
     // 失败原因不能只显示 worker_timeout 这种代号，要有中文名 + 悬停解释。
     assert(app.includes("生图超时（本地掐断）"));
     assert(app.includes("function errorHint"));

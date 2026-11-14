@@ -58,6 +58,35 @@
     setTimeout(() => location.reload(), 350);
   }
 
+  // 上面那条只管 403（会话失效）。但服务正在重启的那几秒，端口根本不监听，
+  // fetch 会直接 reject，拿不到任何状态码 —— 这种情况重开页面没有用，等它起来就行。
+  // 插件宿主大约每小时重启一次，升级时也会重启，所以这段等待是常态路径，不是兜底。
+  const WAKE_DELAYS = [400, 800, 1500, 2500, 4000, 6000];   // 合计约 15 秒
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // 所有等在那儿的请求共用同一个探测：状态轮询每 850ms 发一次，
+  // 各等各的会把重试堆成十几条并发请求。
+  let waking = null;
+  function wakeService() {
+    if (waking) return waking;
+    waking = (async () => {
+      for (const delay of WAKE_DELAYS) {
+        await sleep(delay);
+        try {
+          await fetch("api/status", {
+            headers: { "X-GPTFree-Session": session },
+            cache: "no-store",
+            credentials: "omit",
+          });
+          return true;
+        } catch { /* 还没起来，接着等 */ }
+      }
+      return false;
+    })();
+    const clear = () => { waking = null; };
+    waking.then(clear, clear);
+    return waking;
+  }
+
   function el(tag, className, content) {
     const n = document.createElement(tag);
     if (className) n.className = className;
@@ -141,7 +170,18 @@
     }
     let response;
     try { response = await fetch("api/" + route, opts); }
-    catch { throw new Error("无法连接本地导入服务，请重新打开 Magpie 插件页面"); }
+    catch {
+      // 读请求可以放心等：服务起来后重发一次，用户什么都感觉不到。
+      // 写请求不重试 —— 连接被拒说明没送到，但失败原因拿不到，重发有重复提交的风险。
+      if (data === undefined && await wakeService()) {
+        return api(route, data);
+      }
+      throw new Error(
+        data === undefined
+          ? "本地服务没有响应（插件服务可能正在重启）。稍等十几秒再点一次。"
+          : "本地服务没有响应（插件服务可能正在重启）。这一步没有执行，等十几秒后重试。",
+      );
+    }
     let json;
     try { json = await response.json(); }
     catch { throw new Error("本地服务返回无效响应"); }
@@ -636,6 +676,9 @@
     if ($("syncProviders")) $("syncProviders").disabled = poolBusy;
     if ($("refreshStatsQuota")) $("refreshStatsQuota").disabled = poolBusy || !hasRows;
     if ($("reloadStats")) $("reloadStats").disabled = poolBusy;
+    // 行内按钮也要跟着走：列表是在 poolBusy=true 时渲染的，
+    // 只放开顶部按钮的话，这些「检测/移除」会一直是灰的。
+    for (const btn of document.querySelectorAll(".row-act")) btn.disabled = poolBusy;
     renderBatchBar();
   }
   async function refreshAccounts(payload) {
@@ -929,6 +972,37 @@
     poolTask = next;
     renderBatchStatus();
   }
+  // 一次操作至少亮这么久。快请求（比如只删 1 个号）几十毫秒就回来了，
+  // 转圈一闪而过，用户看到的还是"点了没反应"。
+  const OP_MIN_MS = 420;
+  /**
+   * 所有"点一下就等后端"的操作都走这里：
+   *   按钮立刻换成「xx中…」并禁用 + 批量栏转圈 + 至少亮 OP_MIN_MS。
+   * work 收到的 progress(patch) 可以随时更新文案和进度（批量任务用）。
+   */
+  async function withOp(btn, runningText, work) {
+    const node = typeof btn === "string" ? $(btn) : btn;
+    const idle = node ? node.textContent : "";
+    const wasDisabled = node ? node.disabled : false;
+    const startedAt = Date.now();
+    const task = { kind: "op", label: runningText, btnText: runningText, done: 0, total: 0, node, idle };
+    const progress = (patch) => { Object.assign(task, patch); renderBatchStatus(); };
+    setPoolTask(task);
+    try {
+      return await work(progress);
+    } finally {
+      const left = OP_MIN_MS - (Date.now() - startedAt);
+      if (left > 0) await sleep(left);
+      setPoolTask(null);
+      // 文案和可点状态都要自己还原：renderBatchBar 只管批量按钮，
+      // 不管「刷新列表」这类普通按钮 —— 漏了它就会点一次永久变灰。
+      if (node) {
+        node.textContent = idle;
+        node.disabled = wasDisabled;
+      }
+      renderBatchBar();
+    }
+  }
   function renderBatchStatus() {
     for (const id of ["poolBatchStatus", "batchStatus"]) {
       const host = $(id);
@@ -941,6 +1015,12 @@
       host.append(spin, el("span", "", poolTask.label + progress));
     }
     // 按钮文案跟着任务走：点完立刻变成「删除中…」，而不是只有变灰。
+    // withOp 传了具体按钮时以它为准（普通操作没有固定文案表）。
+    if (poolTask?.node) {
+      poolTask.node.textContent = poolTask.btnText || poolTask.label;
+      poolTask.node.disabled = true;
+      return;
+    }
     const buttons = {
       poolBatchRemove: ["批量删除", "删除中…", "remove"],
       poolBatchCheck: ["批量检测额度", "检测中…", "check"],
@@ -1002,25 +1082,26 @@
     const total = ids.length;
     setPoolBusyState(true);
     let done = 0, ok = 0, bad = 0;
-    try {
-      for (const chunk of chunksOf(ids)) {
-        setPoolTask({ kind: "check", label: "正在检测额度…", done, total });
-        const res = await api("accounts/refresh", { ids: chunk, quotaOnly: true, proxy: statsProxy() });
-        for (const item of res.results || []) {
-          if (item.quotaOk) ok++;
-          else bad++;
+    await withOp("poolBatchCheck", "检测中…", async (progress) => {
+      try {
+        for (const chunk of chunksOf(ids)) {
+          progress({ label: "正在检测额度…", done, total });
+          const res = await api("accounts/refresh", { ids: chunk, quotaOnly: true, proxy: statsProxy() });
+          for (const item of res.results || []) {
+            if (item.quotaOk) ok++;
+            else bad++;
+          }
+          done += chunk.length;
+          progress({ label: "正在检测额度…", done, total });
         }
-        done += chunk.length;
-        setPoolTask({ kind: "check", label: "正在检测额度…", done, total });
+        notice(`已检测 ${done} 个账号，其中 ${ok} 个读到了额度${bad ? `，${bad} 个失败` : ""}`);
+      } catch (err) {
+        notice(`检测中断（已完成 ${done} / ${total}）：${err.message}`, true);
+      } finally {
+        setPoolBusyState(false);
+        await loadPool();
       }
-      notice(`已检测 ${done} 个账号，其中 ${ok} 个读到了额度${bad ? `，${bad} 个失败` : ""}`);
-    } catch (err) {
-      notice(`检测中断（已完成 ${done} / ${total}）：${err.message}`, true);
-    } finally {
-      setPoolTask(null);
-      setPoolBusyState(false);
-      await loadPool();
-    }
+    });
   }
 
   async function batchRemoveAccounts() {
@@ -1035,23 +1116,24 @@
     if (!sure) return;
     setPoolBusyState(true);
     let done = 0;
-    try {
-      for (const chunk of chunksOf(ids)) {
-        setPoolTask({ kind: "remove", label: "正在删除账号…", done, total: n });
-        const res = await api("remove", { ids: chunk });
-        done += Number(res?.count || chunk.length);
-        // 删掉一块就从选择集里摘掉，万一中途失败，剩下的还能直接重试。
-        for (const id of chunk) selectedIds.delete(id);
-        setPoolTask({ kind: "remove", label: "正在删除账号…", done, total: n });
+    await withOp("poolBatchRemove", "删除中…", async (progress) => {
+      try {
+        for (const chunk of chunksOf(ids)) {
+          progress({ label: "正在删除账号…", done, total: n });
+          const res = await api("remove", { ids: chunk });
+          done += Number(res?.count || chunk.length);
+          // 删掉一块就从选择集里摘掉，万一中途失败，剩下的还能直接重试。
+          for (const id of chunk) selectedIds.delete(id);
+          progress({ label: "正在删除账号…", done, total: n });
+        }
+        notice(`已删除 ${done} 个账号`);
+      } catch (err) {
+        notice(`删除中断（已删除 ${done} / ${n}）：${err.message}`, true);
+      } finally {
+        setPoolBusyState(false);
+        await loadPool();
       }
-      notice(`已删除 ${done} 个账号`);
-    } catch (err) {
-      notice(`删除中断（已删除 ${done} / ${n}）：${err.message}`, true);
-    } finally {
-      setPoolTask(null);
-      setPoolBusyState(false);
-      await loadPool();
-    }
+    });
   }
 
   // ---------- 额度统计表排序 ----------
@@ -1213,17 +1295,15 @@
       tr.append(checkedTd);
 
       const actTd = el("td");
-      const btn = el("button", "btn secondary small", "检测额度");
+      const btn = el("button", "btn secondary small row-act", "检测额度");
       btn.type = "button";
       btn.disabled = poolBusy;
-      btn.addEventListener("click", async () => {
-        btn.textContent = "检测中…";
-        await refreshAccounts({
+      btn.addEventListener("click", () =>
+        withOp(btn, "检测中…", () => refreshAccounts({
           id: account.id,
           quotaOnly: true,
           force: account.tokenState !== "unexpired_unverified",
-        });
-      });
+        })));
       actTd.append(btn);
       tr.append(actTd);
 
@@ -1284,14 +1364,13 @@
     side.append(quotaPill);
 
     const controls = el("div", "account-buttons");
-    const refresh = el("button", "btn secondary small", "检测/刷新");
+    const refresh = el("button", "btn secondary small row-act", "检测/刷新");
     refresh.type = "button";
     refresh.disabled = poolBusy;
-    refresh.addEventListener("click", async () => {
-      refresh.textContent = "处理中…";
-      await refreshAccounts({ id: account.id, force: account.tokenState !== "unexpired_unverified" });
-    });
-    const remove = el("button", "btn secondary small", "移除");
+    refresh.addEventListener("click", () =>
+      withOp(refresh, "检测中…", () =>
+        refreshAccounts({ id: account.id, force: account.tokenState !== "unexpired_unverified" })));
+    const remove = el("button", "btn secondary small row-act", "移除");
     remove.type = "button";
     let confirming = false;
     remove.addEventListener("click", async () => {
@@ -1302,18 +1381,20 @@
         return;
       }
       remove.disabled = true;
-      try {
-        const removed = await api("remove", { id: account.id });
-        rowMessages.delete(account.id);
-        await loadPool();
-        if (removed.connectionError)
-          notice("账号已移除，但 Magpie 供应商状态同步失败", true);
-        else if (removed.providerConnected === false)
-          notice("最后一个账号已移除，GPTFree号池已自动断开");
-        else
-          notice("账号已从本地号池移除，其余账号将继续轮询工作");
-      }
-      catch (err) { notice(err.message, true); remove.disabled = false; }
+      await withOp(remove, "移除中…", async () => {
+        try {
+          const removed = await api("remove", { id: account.id });
+          rowMessages.delete(account.id);
+          await loadPool();
+          if (removed.connectionError)
+            notice("账号已移除，但 Magpie 供应商状态同步失败", true);
+          else if (removed.providerConnected === false)
+            notice("最后一个账号已移除，GPTFree号池已自动断开");
+          else
+            notice("账号已从本地号池移除，其余账号将继续轮询工作");
+        }
+        catch (err) { notice(err.message, true); remove.disabled = false; }
+      });
     });
     controls.append(refresh, remove);
     side.append(controls);
@@ -1460,7 +1541,7 @@
     });
     $("checkPaste").addEventListener("click", async () => {
       if (busy) return;
-      await previewText($("pasteAccounts").value, "文本框内容");
+      await withOp("checkPaste", "检查中…", () => previewText($("pasteAccounts").value, "文本框内容"));
     });
     $("clearPaste").addEventListener("click", () => {
       if (busy) return;
@@ -1534,11 +1615,16 @@
       $("pasteAccounts").focus();
       notice("文本框已清空，可以继续批量追加下一批账号到同一个号池");
     });
-    $("refreshAccounts").addEventListener("click", loadPool);
-    $("refreshAllPool").addEventListener("click", () => refreshAccounts({ all: true }));
-    $("syncProviders")?.addEventListener("click", syncProvidersNow);
-    $("refreshStatsQuota")?.addEventListener("click", () => refreshAccounts({ all: true, quotaOnly: true }));
-    $("reloadStats")?.addEventListener("click", loadStats);
+    $("refreshAccounts").addEventListener("click", () =>
+      withOp("refreshAccounts", "刷新中…", loadPool));
+    $("refreshAllPool").addEventListener("click", () =>
+      withOp("refreshAllPool", "检测中…", () => refreshAccounts({ all: true })));
+    $("syncProviders")?.addEventListener("click", () =>
+      withOp("syncProviders", "同步中…", syncProvidersNow));
+    $("refreshStatsQuota")?.addEventListener("click", () =>
+      withOp("refreshStatsQuota", "刷新中…", () => refreshAccounts({ all: true, quotaOnly: true })));
+    $("reloadStats")?.addEventListener("click", () =>
+      withOp("reloadStats", "读取中…", loadStats));
     $("pickAll")?.addEventListener("change", (event) => {
       selectedIds.clear();
       if (event.target.checked) {
