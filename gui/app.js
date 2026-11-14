@@ -370,11 +370,15 @@
    */
   function limitNoteText(account) {
     const span = formatDuration(account?.limitedForMs);
+    // 倒推出来的开始时间不能装作是观测到的，前缀一个「约」。
+    const approx = account?.limitedAtEstimated ? "约 " : "";
     if (account?.quotaStatus === "limited" && account?.limitedAt) {
       const reset = account.quotaResetAt ? formatTime(account.quotaResetAt, " · 预计 ") : "";
       return {
-        text: `限流 ${span || "刚开始"}`,
-        title: `${formatTime(account.limitedAt, "限流开始于 ")}${reset}`,
+        text: `限流 ${approx}${span || "刚开始"}`,
+        title: `${formatTime(account.limitedAt, `限流开始于${approx}`)}${reset}` +
+          (account.limitedAtEstimated
+            ? "（开始时间是从上游重置时间倒推的，不是观测值）" : ""),
       };
     }
     // 记这笔账之前就已经在限流的号：开始时间没有，别硬编一个。
@@ -576,32 +580,38 @@
     }
   }
   // ---------- 统计：近 7 天趋势 ----------
+  // 柱子高度算的是「生图 + 文本」的总流量，tooltip 里再把两类拆开 ——
+  // 只看一根柱的话，文本全成功、生图全失败的日子会显得一切正常。
   function renderHistory(data) {
     const host = $("historyChart");
     const range = $("insightRange");
     const days = Array.isArray(data?.history) ? data.history : [];
+    const okOf = (d) => (d.success || 0) + (d.textSuccess || 0);
+    const badOf = (d) => (d.fail || 0) + (d.textFail || 0);
     host.replaceChildren();
     if (!days.length) {
       host.append(el("div", "insight-empty", "还没有调用记录"));
       range.textContent = "";
       return;
     }
-    const max = Math.max(1, ...days.map((d) => Math.max(d.success || 0, d.fail || 0)));
+    const max = Math.max(1, ...days.map((d) => Math.max(okOf(d), badOf(d))));
     for (const day of days) {
       const wrap = el("div", "history-day");
       const bars = el("div", "history-bars");
       const ok = el("div", "history-bar ok");
-      ok.style.height = Math.round(((day.success || 0) / max) * 100) + "%";
-      ok.title = `${day.date} 成功 ${day.success} 次`;
+      ok.style.height = Math.round((okOf(day) / max) * 100) + "%";
+      ok.title = `${day.date} 成功 ${okOf(day)} 次（生图 ${day.success || 0} · 文本 ${day.textSuccess || 0}）`;
       const bad = el("div", "history-bar fail");
-      bad.style.height = Math.round(((day.fail || 0) / max) * 100) + "%";
-      bad.title = `${day.date} 失败 ${day.fail} 次`;
+      bad.style.height = Math.round((badOf(day) / max) * 100) + "%";
+      bad.title = `${day.date} 失败 ${badOf(day)} 次（生图 ${day.fail || 0} · 文本 ${day.textFail || 0}）`;
       bars.append(ok, bad);
       wrap.append(bars, el("span", "", String(day.date).slice(5)));
       host.append(wrap);
     }
     const today = data?.today || {};
-    range.textContent = `今天 ${today.success || 0} 成 / ${today.fail || 0} 败`;
+    range.textContent =
+      `今天 生图 ${today.success || 0} 成 / ${today.fail || 0} 败` +
+      ` · 文本 ${today.textSuccess || 0} 成 / ${today.textFail || 0} 败`;
   }
 
   function renderFailBreakdown(data) {

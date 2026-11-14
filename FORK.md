@@ -15,15 +15,21 @@
 | `lib/chatgpt-web-image.mjs` | 单次 35s / 整单 55s 硬预算（`AbortController` + `Promise.race`，重新登录也算在预算里）；额度耗尽的 400 换号而不是整个请求失败；解析"上限将在 21小时 后重置"得到 `retryAfter`。 |
 | `lib/chatgpt-web-text.mjs` | 单次尝试压到 60s 且不超过剩余预算（worker 默认 180s 比整单 120s 还长）；文本选号排除「重新登录都过不去」的号，但**不**套用图片的熔断/额度状态，并用自己的轮转账本，不干扰图片按额度加权。 |
 | `gui/app.js` | 额度统计页的失效徽章，区分三种失效原因并给出对应的复活提示。 |
-| `test/*` | 111 个用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、预算超时、额度 400 换号、额度复检守卫、文本链路、按天统计、限流生命周期、批量接口。 |
+| `test/*` | 116 个用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、预算超时、额度 400 换号、额度复检守卫、文本链路、按天统计、限流生命周期、批量接口。 |
 
 环境变量（都有默认值，一般不用设）：
 
 ```
 MAGPIE_GPTFREE_IMAGE_DIR          PNG 落盘目录，默认 /config/images
+MAGPIE_GPTFREE_PUBLIC_BASE        图片链接前缀，默认空 = 返回相对路径 /img/xxx.png
+                                  要绝对地址就设成 https://你的域名（结尾斜杠会去掉）
 MAGPIE_GPTFREE_MAX_TOTAL_MS       整单预算，默认 55000
 MAGPIE_GPTFREE_ATTEMPT_TIMEOUT_MS 单次超时，默认 35000
 MAGPIE_GPTFREE_MAX_SLOW_FAILOVERS 慢失败最多换几次号，默认 2
+MAGPIE_GPTFREE_TEXT_ATTEMPT_MS    文本单次尝试上限，默认 60000
+MAGPIE_GPTFREE_TZ_OFFSET_MIN      按天统计的时区偏移，默认 -480（UTC+8）
+MAGPIE_GPTFREE_HEALTH_MIN_USABLE  /api/health 判不健康的可用号下限，默认 3
+MAGPIE_GPTFREE_HEALTH_MIN_QUOTA   同上，总剩余额度下限，默认 50
 ```
 
 ## 怎么跑测试
@@ -73,7 +79,7 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 
 ## 服务器上怎么用
 
-`example.com` 的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptfree`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptfree`）。
+部署机的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptfree`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptfree`）。
 
 - `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
 - `/root/fix-gptfree-chat-image.sh` —— 从 `/root/gptfree-patch/` 覆盖九个文件并重启。**现在只是兜底**：万一哪天有人把 spec 改回上游，或者 Magpie 重建 node_modules 时拉错了源，用它把我们的代码按回去。

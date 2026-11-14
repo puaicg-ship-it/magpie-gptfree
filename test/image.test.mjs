@@ -133,11 +133,37 @@ test("local bridge: chat/completions with an image model goes through /images/ge
 
     const body = await response.json();
     assert.equal(body.object, "chat.completion");
-    assert.match(body.choices[0].message.content, /^!\[image\]\(https:\/\/.+\/img\/.+\.png\)$/);
+    // 没设 MAGPIE_GPTFREE_PUBLIC_BASE 时回相对路径：代码里不绑任何具体主机。
+    assert.match(body.choices[0].message.content, /^!\[image\]\(\/img\/.+\.png\)$/);
     const saved = await readFile(join(dir, body.choices[0].message.content.match(/\/img\/(.+)\)$/)[1]));
     assert.equal(saved.length > 0, true);
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an image link becomes absolute only when MAGPIE_GPTFREE_PUBLIC_BASE says so", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-base-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://images.example.test/";
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const response = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "a cat" }] }),
+      {},
+      {
+        forward: async () => new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        }),
+      },
+    );
+    const body = await response.json();
+    // 结尾的斜杠要去掉，不能拼出 //img/。
+    assert.match(body.choices[0].message.content, /^!\[image\]\(https:\/\/images\.example\.test\/img\/.+\.png\)$/);
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
     await rm(dir, { recursive: true, force: true });
   }
 });

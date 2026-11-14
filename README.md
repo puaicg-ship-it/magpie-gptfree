@@ -1,12 +1,29 @@
 # GPT号池（magpie-gptfree）
 
+> **这是 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) 的修改版，不是上游原版。**
+>
+> 基于上游 **0.6.6 / commit `5ab9b99`**（MIT，见上游 `package.json`）。我们改了什么、
+> 为什么改、怎么跟上游同步，全部写在 **[FORK.md](./FORK.md)** 里，简要清单：
+>
+> | 方向 | 改动 |
+> | --- | --- |
+> | 选号 | 按剩余额度加权轮转（nginx smooth WRR）+ 连续失败熔断（10min→1h）+ 额度归零后按上游重置时间自动复检 |
+> | 判死 | 四条规则（`auth` / `never` / `stale` / `marked`），分类计数，可整组复检或删除 |
+> | 请求预算 | 单次 35s / 整单 55s 硬超时，额度耗尽的 400 自动换号而不是整个请求失败 |
+> | 图片桥 | 新增 `lib/chat-image-bridge.mjs`，把 `chat/completions` 上的图片模型桥到 `/images/generations` |
+> | 统计 | 按天记成功/失败（生图与文本分开）、失败原因分布、限流起止时间 |
+> | 面板 | 趋势图、废号分组、多选批量操作、`GET /api/health` 健康检查 |
+>
+> 安装时请用 `https://github.com/puaicg-ship-it/magpie-gptfree`（本仓），不要用上游地址 ——
+> 上游的提交会覆盖上面这些改动。细节见 FORK.md「怎么装、怎么升级」。
+
 > **3 分钟拥有一个自己的 GPT 号池：批量导入、自动轮询、生图额度一目了然。**
 >
 > 不装环境、不跑浏览器、不用改配置。填个仓库地址，把账号文本粘进去，剩下的插件自己干。
 
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
 [![license](https://img.shields.io/badge/license-MIT-16845c)](./package.json)
-[![version](https://img.shields.io/badge/version-0.6.4-a36207)](./package.json)
+[![version](https://img.shields.io/badge/version-0.6.6-a36207)](./package.json)
 
 ---
 

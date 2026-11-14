@@ -15,6 +15,7 @@ import {
   isAccountDead,
   recordImageCall,
   recordQuotaCheck,
+  recordTextCall,
   summarizePoolStats,
 } from "../lib/pool-stats.mjs";
 import { accountSlotTag } from "../lib/pool-connection.mjs";
@@ -491,4 +492,78 @@ test("an upstream rate limit starts a round even when the quota snapshot said ot
   assert.ok(store.state.accounts[tag].limitedAt);
   assert.equal(store.state.accounts[tag].limitCount, 1);
   assert.equal(store.state.accounts[tag].imageQuota, 0);
+});
+
+// 文本流量以前完全不计账，统计页只看得见生图。现在分开记，但绝不能混进
+// successCalls/failCalls —— 那会让 never 判死规则认不出「画不了图的号」。
+test("text calls are counted separately and never pollute the image counters", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "text@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordTextCall({ email, success: true }, { statsStore: store });
+  await recordTextCall({ email, success: true }, { statsStore: store });
+  await recordTextCall({ email, success: false, error: "rate_limited" }, { statsStore: store });
+
+  const rec = store.state.accounts[tag];
+  assert.equal(rec.textSuccessCalls, 2);
+  assert.equal(rec.textFailCalls, 1);
+  assert.equal(rec.textLastErrorCode, "rate_limited");
+  assert.equal(rec.successCalls, 0, "生图计数不受文本影响");
+  assert.equal(rec.failCalls, 0);
+  assert.equal(store.state.totals.successCalls, 0);
+  assert.equal(store.state.totals.textSuccessCalls, 2);
+  assert.equal(store.state.totals.textFailCalls, 1);
+
+  const snap = summarizePoolStats(
+    [{ email, password: "p", totp: "s", accessToken: "t" }],
+    store.state,
+  );
+  assert.equal(snap.today.textSuccess, 2);
+  assert.equal(snap.today.textFail, 1);
+  assert.equal(snap.today.success, 0, "文本不进生图的今日成功数");
+  assert.deepEqual(snap.failBreakdown, {}, "文本失败原因不搅进生图的原因分布");
+  assert.equal(snap.accounts[0].textSuccessCalls, 2);
+});
+
+// 一个只能答话、画不了图的号仍然该被判死：文本成功不能把它从 never 里捞出来。
+test("a text-only account is still a dead image account", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "chatonly@example.com";
+  for (let i = 0; i < 20; i++) {
+    await recordImageCall({ email, success: false, error: "request_timeout" }, { statsStore: store });
+  }
+  await recordTextCall({ email, success: true }, { statsStore: store });
+  const snap = summarizePoolStats(
+    [{ email, password: "p", totp: "s", accessToken: "t" }],
+    store.state,
+  );
+  assert.equal(snap.accounts[0].deadReason, "never");
+});
+
+// 倒推出来的限流开始时间必须能被界面识别出来，否则「限流 8 小时」会被当成观测值。
+test("an estimated limit start is flagged, and a real observation clears the flag", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "est@example.com";
+  const tag = accountSlotTag(email);
+  const estimated = new Date(Date.now() - 6 * 3600_000).toISOString();
+
+  store.state.accounts[tag] = {
+    imageQuota: 0, limitedAt: estimated, limitCount: 1, limitedAtEstimated: true,
+  };
+  const before = summarizePoolStats(
+    [{ email, password: "p", totp: "s", accessToken: "t" }],
+    store.state,
+  );
+  assert.equal(before.accounts[0].limitedAtEstimated, true);
+
+  // 额度回来了：这一轮结束，估计值不再挂着。
+  await recordQuotaCheck({ email, quota: 25 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].limitedAtEstimated, false);
+  assert.equal(store.state.accounts[tag].lastLimitedAt, estimated);
+
+  // 再次打到 0：这次是观测到的，不是估计的。
+  await recordQuotaCheck({ email, quota: 0 }, { statsStore: store });
+  assert.ok(store.state.accounts[tag].limitedAt);
+  assert.equal(store.state.accounts[tag].limitedAtEstimated, false);
 });

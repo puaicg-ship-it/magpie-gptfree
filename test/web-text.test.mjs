@@ -210,6 +210,37 @@ test("executeWebTextGeneration handles 401 reauth, 429 failover, and non-streami
   clearTextCooldowns();
 });
 
+// 文本每次尝试都要能报给统计：哪个号成的、哪个号败的、败在什么原因上。
+test("executeWebTextGeneration reports every account attempt for the stats ledger", async () => {
+  clearTextCooldowns();
+  const bad = platformJwt(3600, "bad@example.com");
+  const good = platformJwt(3600, "good@example.com");
+  const seen = [];
+
+  const res = await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    [
+      { email: "bad@example.com", accessToken: bad },
+      { email: "good@example.com", accessToken: good },
+    ],
+    {
+      onAttempt: (account, outcome) => seen.push([account.email, outcome.ok, outcome.code || ""]),
+      worker: async (payload) => (
+        payload.access_token === bad
+          ? { ok: false, http_status: 429, error_code: "rate_limit_exceeded", error: "slow down", retry_after: 1 }
+          : { ok: true, text: "ok" }
+      ),
+    },
+  );
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(seen, [
+    ["bad@example.com", false, "rate_limit_exceeded"],
+    ["good@example.com", true, ""],
+  ]);
+  clearTextCooldowns();
+});
+
 test("poolFetch switches to Web text if reauth produces a Platform token and runWebTextWorker validates missing token / abort", async () => {
   clearTextCooldowns();
   const oldCodex = codexJwt(3600, "acct_old");
