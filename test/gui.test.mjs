@@ -490,8 +490,7 @@ test("GUI exposes 额度统计 tab, per-account image quota pills, GET /api/stat
   }
 });
 
-test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章区分已确认与未确认", async () => {
-  const h = await harness({ poolRead: async () => [] });
+test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章区分已确认与未确认", async () => {  const h = await harness({ poolRead: async () => [] });
   try {
     for (const id of [
       "poolSearch", "poolGroupSelect", "poolSortSelect", "poolFilterInfo",
@@ -511,6 +510,13 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     assert(app.includes("function poolGroupKey"));
     assert(app.includes("function visibleAccounts"));
     assert(app.includes("function sortedForStats"));
+    // 趋势图能在按日/周/月/年之间切换
+    assert(h.html.includes('id="historyPeriod"'));
+    assert(h.html.includes('value="week"'));
+    assert(h.html.includes('value="month"'));
+    assert(h.html.includes('value="year"'));
+    assert(app.includes("HISTORY_VIEWS"));
+    assert(app.includes("function historyBuckets"));
     assert(!app.includes("innerHTML"));
     assert(!app.includes("localStorage"));
   } finally { await h.close(); }

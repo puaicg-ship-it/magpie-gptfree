@@ -198,10 +198,18 @@
         <div class="insights">
           <article class="insight-card">
             <div class="insight-head">
-              <h3>近 7 天调用</h3>
-              <span id="insightRange" class="muted tiny"></span>
+              <h3>调用趋势</h3>
+              <div class="insight-tools">
+                <span id="insightRange" class="muted tiny"></span>
+                <select id="historyPeriod" aria-label="趋势粒度">
+                  <option value="day">按日</option>
+                  <option value="week">按周</option>
+                  <option value="month">按月</option>
+                  <option value="year">按年</option>
+                </select>
+              </div>
             </div>
-            <div id="historyChart" class="history-chart" role="img" aria-label="近 7 天成功与失败调用"></div>
+            <div id="historyChart" class="history-chart" role="img" aria-label="调用趋势"></div>
           </article>
           <article class="insight-card">
             <div class="insight-head">

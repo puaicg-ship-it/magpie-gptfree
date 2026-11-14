@@ -668,6 +668,65 @@
   // ---------- 统计：近 7 天趋势 ----------
   // 柱子高度算的是「生图 + 文本」的总流量，tooltip 里再把两类拆开 ——
   // 只看一根柱的话，文本全成功、生图全失败的日子会显得一切正常。
+  // ---------- 调用趋势：按日 / 周 / 月 / 年 ----------
+  // 账本按天记，聚合在前端做：换粒度不用重算，也不用改存储。
+  const HISTORY_VIEWS = {
+    day: { label: "按日", window: 14, unit: "天" },
+    week: { label: "按周", window: 12, unit: "周" },
+    month: { label: "按月", window: 12, unit: "个月" },
+    // 账本只留 400 天，所以「按年」最多给两年，多画的空柱子是骗人的。
+    year: { label: "按年", window: 2, unit: "年" },
+  };
+  let historyPeriod = "day";
+  const ymd = (d) => [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, "0"),
+    String(d.getDate()).padStart(2, "0"),
+  ].join("-");
+  function periodKeyOf(dateStr, period) {
+    if (period === "year") return dateStr.slice(0, 4);
+    if (period === "month") return dateStr.slice(0, 7);
+    if (period !== "week") return dateStr;
+    // 周一算一周的开始，和国内习惯一致。
+    const d = new Date(dateStr + "T00:00:00");
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    return ymd(d);
+  }
+  function historyBuckets(days, period) {
+    const view = HISTORY_VIEWS[period] || HISTORY_VIEWS.day;
+    const now = new Date();
+    const keys = [];
+    for (let i = view.window - 1; i >= 0; i--) {
+      let d = new Date(now);
+      if (period === "day") d.setDate(d.getDate() - i);
+      else if (period === "week") d.setDate(d.getDate() - ((d.getDay() + 6) % 7) - i * 7);
+      else if (period === "month") d = new Date(d.getFullYear(), d.getMonth() - i, 1);
+      else d = new Date(d.getFullYear() - i, 0, 1);
+      keys.push(ymd(d).slice(0, period === "year" ? 4 : period === "month" ? 7 : 10));
+    }
+    const map = new Map(keys.map((k) => [k, { key: k, success: 0, fail: 0, textSuccess: 0, textFail: 0 }]));
+    for (const day of days) {
+      const bucket = map.get(periodKeyOf(day.date, period));
+      if (!bucket) continue;   // 超出当前窗口的老账，不画
+      bucket.success += day.success || 0;
+      bucket.fail += day.fail || 0;
+      bucket.textSuccess += day.textSuccess || 0;
+      bucket.textFail += day.textFail || 0;
+    }
+    return { view, buckets: [...map.values()] };
+  }
+  function bucketLabel(key, period) {
+    if (period === "year") return key;
+    if (period === "month") return key.slice(5) + "月";
+    return key.slice(5);   // MM-DD
+  }
+  function bucketTitle(key, period) {
+    if (period === "year") return key + " 年";
+    if (period === "month") return key;
+    if (period === "week") return key + " 那一周";
+    return key;
+  }
+
   function renderHistory(data) {
     const host = $("historyChart");
     const range = $("insightRange");
@@ -680,24 +739,32 @@
       range.textContent = "";
       return;
     }
-    const max = Math.max(1, ...days.map((d) => Math.max(okOf(d), badOf(d))));
-    for (const day of days) {
+    const { view, buckets } = historyBuckets(days, historyPeriod);
+    const max = Math.max(1, ...buckets.map((d) => Math.max(okOf(d), badOf(d))));
+    for (const bucket of buckets) {
       const wrap = el("div", "history-day");
       const bars = el("div", "history-bars");
       const ok = el("div", "history-bar ok");
-      ok.style.height = Math.round((okOf(day) / max) * 100) + "%";
-      ok.title = `${day.date} 成功 ${okOf(day)} 次（生图 ${day.success || 0} · 文本 ${day.textSuccess || 0}）`;
+      ok.style.height = Math.round((okOf(bucket) / max) * 100) + "%";
+      ok.title = `${bucketTitle(bucket.key, historyPeriod)} 成功 ${okOf(bucket)} 次（生图 ${bucket.success} · 文本 ${bucket.textSuccess}）`;
       const bad = el("div", "history-bar fail");
-      bad.style.height = Math.round((badOf(day) / max) * 100) + "%";
-      bad.title = `${day.date} 失败 ${badOf(day)} 次（生图 ${day.fail || 0} · 文本 ${day.textFail || 0}）`;
+      bad.style.height = Math.round((badOf(bucket) / max) * 100) + "%";
+      bad.title = `${bucketTitle(bucket.key, historyPeriod)} 失败 ${badOf(bucket)} 次（生图 ${bucket.fail} · 文本 ${bucket.textFail}）`;
       bars.append(ok, bad);
-      wrap.append(bars, el("span", "", String(day.date).slice(5)));
+      wrap.append(bars, el("span", "", bucketLabel(bucket.key, historyPeriod)));
       host.append(wrap);
     }
+    const sum = buckets.reduce((acc, b) => {
+      acc.ok += okOf(b); acc.bad += badOf(b);
+      acc.textOk += b.textSuccess; acc.textBad += b.textFail;
+      return acc;
+    }, { ok: 0, bad: 0, textOk: 0, textBad: 0 });
     const today = data?.today || {};
     range.textContent =
-      `今天 生图 ${today.success || 0} 成 / ${today.fail || 0} 败` +
-      ` · 文本 ${today.textSuccess || 0} 成 / ${today.textFail || 0} 败`;
+      `近 ${view.window} ${view.unit} 生图 ${sum.ok - sum.textOk} 成 / ${sum.bad - sum.textBad} 败` +
+      ` · 文本 ${sum.textOk} 成 / ${sum.textBad} 败` +
+      ` · 今天 ${today.success || 0} / ${today.fail || 0}`;
+    range.title = `按${view.label.slice(1)}汇总；今天：生图 ${today.success || 0} 成 / ${today.fail || 0} 败，文本 ${today.textSuccess || 0} 成 / ${today.textFail || 0} 败`;
   }
 
   function renderFailBreakdown(data) {
@@ -1388,6 +1455,10 @@
       if (lastPoolData) renderPoolView(lastPoolData);
       if (lastStats) renderStatsView(lastStats);
       else renderBatchBar();
+    });
+    $("historyPeriod")?.addEventListener("change", (event) => {
+      historyPeriod = HISTORY_VIEWS[event.target.value] ? event.target.value : "day";
+      if (lastStats) renderHistory(lastStats);
     });
     for (const button of document.querySelectorAll(".sort-th")) {
       button.addEventListener("click", () => {
