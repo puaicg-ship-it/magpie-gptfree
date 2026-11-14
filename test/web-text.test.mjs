@@ -238,3 +238,26 @@ test("poolFetch switches to Web text if reauth produces a Platform token and run
   assert.equal(isWebOnlyToken(renewedPlatform), true);
   assert.equal(codexCalls, 0);
 });
+
+// worker 默认 180 秒，比整单 120 秒的预算还长：一次卡住就把预算吃光，
+// 后面的号连试都轮不上。图片链路踩过这个坑，文本这边同样要压住。
+test("a single text attempt is bounded by the remaining budget, not the worker default", async () => {
+  clearTextCooldowns();
+  const tok = platformJwt(3600, "bounded@example.com");
+  const seen = [];
+  const res = await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    [{ email: "bounded@example.com", accessToken: tok }],
+    {
+      worker: async (payload, opts) => {
+        seen.push(opts?.timeout);
+        return { ok: true, text: "ok" };
+      },
+    },
+  );
+  assert.equal(res.status, 200);
+  assert.equal(seen.length, 1);
+  assert.ok(Number.isFinite(seen[0]), "worker 必须拿到显式超时");
+  assert.ok(seen[0] <= 60_000, "不能是 worker 默认的 180 秒");
+  assert.ok(seen[0] >= 5_000, "也别压到短得没法用");
+});

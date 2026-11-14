@@ -4,6 +4,7 @@ import {
   accountsNeedingQuotaRefresh,
   refreshExpiredQuotas,
   selectPoolOrder,
+  textPoolAccounts,
 } from "../lib/codex-pool.mjs";
 import {
   AUTH_FAIL_LIMIT,
@@ -361,4 +362,47 @@ test("an account already checked after its reset time and still failing is left 
     },
   });
   assert.equal(accountsNeedingQuotaRefresh([live], checkedBeforeReset, { probedAt: new Map() }).length, 1);
+});
+
+// 文本和生图是两条独立的上游能力：一个号出不了图，不代表它答不了话。
+// 但「重新登录都过不去」的号，文本也一样废，得排掉。
+test("text selection drops only login-dead accounts, not image-broken ones", () => {
+  const authDead = account("authdead@example.com");
+  const neverWorked = account("neverworked@example.com");
+  const healthy = account("healthy@example.com");
+  const stats = statsWith({
+    [authDead.email]: {
+      imageQuota: 25, successCalls: 1, failCalls: 3,
+      authFails: AUTH_FAIL_LIMIT, deadAt: new Date().toISOString(),
+    },
+    [neverWorked.email]: { imageQuota: 25, successCalls: 0, failCalls: 60 },
+    [healthy.email]: { imageQuota: 25, successCalls: 4, failCalls: 0 },
+  });
+
+  const kept = textPoolAccounts([authDead, neverWorked, healthy], stats).map((a) => a.email);
+  assert.deepEqual(kept, [neverWorked.email, healthy.email],
+    "一个从没出过图的号，文本照样要试");
+
+  assert.equal(textPoolAccounts([authDead], null).length, 1, "没有统计时原样返回");
+  assert.equal(textPoolAccounts([authDead], stats).length, 1, "全被判死时退回原列表，别直接报空池");
+});
+
+test("a caller can keep its own rotation ledger so text traffic does not skew image weights", () => {
+  const a = account("ledger-a@example.com");
+  const b = account("ledger-b@example.com");
+  const stats = statsWith({
+    [a.email]: { imageQuota: 25 },
+    [b.email]: { imageQuota: 25 },
+  });
+
+  // 每次给一份新账本 → 起点相同
+  const first = selectPoolOrder({ accounts: [a, b], stats, credit: new Map() }).map((x) => x.email);
+  const again = selectPoolOrder({ accounts: [a, b], stats, credit: new Map() }).map((x) => x.email);
+  assert.deepEqual(first, again);
+
+  // 共用一份账本 → 两轮之间轮转
+  const shared = new Map();
+  const r1 = selectPoolOrder({ accounts: [a, b], stats, credit: shared }).map((x) => x.email);
+  const r2 = selectPoolOrder({ accounts: [a, b], stats, credit: shared }).map((x) => x.email);
+  assert.notDeepEqual(r1, r2, "同一份账本会轮转");
 });
