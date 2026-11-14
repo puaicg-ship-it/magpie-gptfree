@@ -168,15 +168,43 @@
             <span class="stat-note">本机累计生图失败次数</span>
           </article>
         </div>
+        <div class="insights">
+          <article class="insight-card">
+            <div class="insight-head">
+              <h3>近 7 天调用</h3>
+              <span id="insightRange" class="muted tiny"></span>
+            </div>
+            <div id="historyChart" class="history-chart" role="img" aria-label="近 7 天成功与失败调用"></div>
+          </article>
+          <article class="insight-card">
+            <div class="insight-head">
+              <h3>失败原因</h3>
+              <span id="insightFailTotal" class="muted tiny"></span>
+            </div>
+            <div id="failBreakdown" class="fail-breakdown"></div>
+          </article>
+        </div>
         <div id="statsHint" class="stats-hint hidden" role="status"></div>
+        <div class="section-head with-top">
+          <h2>失效账号分类</h2>
+          <span class="muted tiny">判死只是不再派活，账号仍在池子里；点分类可只选这一类</span>
+        </div>
+        <div id="deadGroups" class="dead-groups"></div>
         <div class="section-head with-top">
           <h2>账号额度明细</h2>
           <span id="statsTableSub" class="muted tiny">点击单行「检测额度」可向 chatgpt.com 刷新该账号最新生图额度</span>
+        </div>
+        <div id="batchBar" class="batch-bar hidden">
+          <span id="batchCount">已选 0 个</span>
+          <button id="batchCheck" type="button" class="btn secondary small">批量检测额度</button>
+          <button id="batchRemove" type="button" class="btn danger small">批量删除</button>
+          <button id="batchClear" type="button" class="btn secondary small">取消选择</button>
         </div>
         <div class="table-wrap stats-table-wrap">
           <table>
             <thead>
               <tr>
+                <th class="pick"><input id="pickAll" type="checkbox" aria-label="全选账号"></th>
                 <th>账号</th>
                 <th>类型</th>
                 <th>状态</th>

@@ -34,6 +34,11 @@
     failed: "授权失败",
   };
   let preview = null, previewSource = "", lastSeq = 0, polling = null, busy = false, poolBusy = false, checkingDraft = false, activeTab = "import";
+  // 表格多选：选中的是界面 id（HMAC 后的），不是邮箱。
+  const selectedIds = new Set();
+  let lastAccounts = [];
+  let deadFilter = "";
+  let lastStats = null;
   const jobStates = new Map();
   const rowMessages = new Map();
   // Magpie restarts its plugin host about once an hour (community plugin
@@ -350,6 +355,37 @@
     if (!code) return "";
     return ERROR_LABELS[code] || code;
   }
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return "";
+    const min = Math.round(ms / 60000);
+    if (min < 60) return `${min} 分钟`;
+    const hours = Math.floor(min / 60);
+    const rest = min % 60;
+    if (hours < 24) return rest ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
+    return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
+  }
+  /**
+   * 限流备注：正在限流就说"限流多久了"，已经恢复就说"上一轮限了多久"。
+   * 数据来自 pool-stats 的 limitedAt / lastLimitedAt / recoveredAt / limitedForMs。
+   */
+  function limitNoteText(account) {
+    const span = formatDuration(account?.limitedForMs);
+    if (account?.quotaStatus === "limited" && account?.limitedAt) {
+      const reset = account.quotaResetAt ? formatTime(account.quotaResetAt, " · 预计 ") : "";
+      return {
+        text: `限流 ${span || "刚开始"}`,
+        title: `${formatTime(account.limitedAt, "限流开始于 ")}${reset}`,
+      };
+    }
+    if (account?.recoveredAt && account?.lastLimitedAt) {
+      return {
+        text: `已恢复 · 上轮限流 ${span || "—"}`,
+        title: `${formatTime(account.lastLimitedAt, "上轮限流开始 ")} · ${formatTime(account.recoveredAt, "恢复于 ")}` +
+          (account.limitCount ? ` · 累计 ${account.limitCount} 次` : ""),
+      };
+    }
+    return null;
+  }
   function quotaBadgeInfo(account) {
     const status = account.quotaStatus || (typeof account.imageQuota === "number"
       ? (account.imageQuota === 0 ? "limited" : "available")
@@ -530,7 +566,173 @@
       checkingDraft = false;
     }
   }
+  // ---------- 统计：近 7 天趋势 ----------
+  function renderHistory(data) {
+    const host = $("historyChart");
+    const range = $("insightRange");
+    const days = Array.isArray(data?.history) ? data.history : [];
+    host.replaceChildren();
+    if (!days.length) {
+      host.append(el("div", "insight-empty", "还没有调用记录"));
+      range.textContent = "";
+      return;
+    }
+    const max = Math.max(1, ...days.map((d) => Math.max(d.success || 0, d.fail || 0)));
+    for (const day of days) {
+      const wrap = el("div", "history-day");
+      const bars = el("div", "history-bars");
+      const ok = el("div", "history-bar ok");
+      ok.style.height = Math.round(((day.success || 0) / max) * 100) + "%";
+      ok.title = `${day.date} 成功 ${day.success} 次`;
+      const bad = el("div", "history-bar fail");
+      bad.style.height = Math.round(((day.fail || 0) / max) * 100) + "%";
+      bad.title = `${day.date} 失败 ${day.fail} 次`;
+      bars.append(ok, bad);
+      wrap.append(bars, el("span", "", String(day.date).slice(5)));
+      host.append(wrap);
+    }
+    const today = data?.today || {};
+    range.textContent = `今天 ${today.success || 0} 成 / ${today.fail || 0} 败`;
+  }
+
+  function renderFailBreakdown(data) {
+    const host = $("failBreakdown");
+    const totalLabel = $("insightFailTotal");
+    host.replaceChildren();
+    const entries = Object.entries(data?.failBreakdown || {})
+      .filter(([, n]) => Number(n) > 0)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 5);
+    const sum = entries.reduce((acc, [, n]) => acc + Number(n), 0);
+    totalLabel.textContent = sum ? `近 7 天 ${sum} 次` : "";
+    if (!entries.length) {
+      host.append(el("div", "insight-empty", "近 7 天没有失败记录"));
+      return;
+    }
+    const top = Number(entries[0][1]) || 1;
+    for (const [code, n] of entries) {
+      const row = el("div", "fail-row");
+      const label = el("div", "fail-label", errorLabel(code));
+      label.title = code;
+      const num = el("div", "quota-num", String(n));
+      const track = el("div", "fail-track");
+      const fill = el("div", "fail-fill");
+      fill.style.width = Math.max(4, Math.round((Number(n) / top) * 100)) + "%";
+      track.append(fill);
+      row.append(label, num, track);
+      host.append(row);
+    }
+  }
+
+  // ---------- 失效账号分类 ----------
+  const DEAD_GROUP_INFO = {
+    auth: { title: "登录失效", note: "重新登录连续失败，多半是 MFA 被拦。点「检测额度」通过即可复活。" },
+    never: { title: "从未成功", note: "导入后一次都没出过图，多半凭据或账号本身有问题，建议重新导入或删除。" },
+    stale: { title: "三天未成功", note: "连续 72 小时没有一次成功，等它自己恢复或人工复检。" },
+    marked: { title: "已标记失效", note: "被显式标记为失效。" },
+  };
+
+  function renderDeadGroups(data, accounts) {
+    const host = $("deadGroups");
+    host.replaceChildren();
+    const breakdown = data?.deadBreakdown || {};
+    const groups = Object.entries(DEAD_GROUP_INFO)
+      .map(([key, info]) => ({ key, ...info, count: Number(breakdown[key] || 0) }))
+      .filter((g) => g.count > 0);
+    if (!groups.length) {
+      host.append(el("div", "insight-empty", "当前没有失效账号。"));
+      return;
+    }
+    for (const group of groups) {
+      const btn = el("button", "dead-group");
+      btn.type = "button";
+      btn.setAttribute("aria-pressed", deadFilter === group.key ? "true" : "false");
+      btn.title = deadFilter === group.key ? "再点一次取消选择" : "选中这一类的全部账号";
+      btn.append(el("b", "", String(group.count)));
+      btn.append(el("strong", "", group.title));
+      btn.append(el("small", "", group.note));
+      btn.addEventListener("click", () => {
+        const next = deadFilter === group.key ? "" : group.key;
+        deadFilter = next;
+        selectedIds.clear();
+        if (next) {
+          for (const a of accounts) {
+            if (a.deadReason === next && a.id) selectedIds.add(a.id);
+          }
+        }
+        renderDeadGroups(data, accounts);
+        renderStatsView(data);
+      });
+      host.append(btn);
+    }
+  }
+
+  // ---------- 多选批量 ----------
+  function pruneSelection(accounts) {
+    lastAccounts = accounts;
+    const ids = new Set(accounts.map((a) => a.id).filter(Boolean));
+    for (const id of [...selectedIds]) {
+      if (!ids.has(id)) selectedIds.delete(id);
+    }
+    renderBatchBar();
+  }
+
+  function renderBatchBar() {
+    const bar = $("batchBar");
+    if (!bar) return;
+    const n = selectedIds.size;
+    bar.classList.toggle("hidden", n === 0);
+    $("batchCount").textContent = `已选 ${n} 个`;
+    const all = $("pickAll");
+    if (all) {
+      const selectable = lastAccounts.filter((a) => a.id).length;
+      all.checked = n > 0 && n === selectable;
+      all.indeterminate = n > 0 && !all.checked;
+    }
+  }
+
+  function statsProxy() {
+    return ($("statsProxyInput")?.value || $("poolProxyInput")?.value || $("proxyInput")?.value || "").trim();
+  }
+
+  async function batchRefreshQuota() {
+    if (poolBusy || !selectedIds.size) return;
+    setPoolBusyState(true);
+    try {
+      const res = await api("accounts/refresh", {
+        ids: [...selectedIds],
+        quotaOnly: true,
+        proxy: statsProxy(),
+      });
+      const ok = (res.results || []).filter((r) => r.quotaOk).length;
+      notice(`已检测 ${res.results?.length || 0} 个账号，其中 ${ok} 个读到了额度`);
+    } catch (err) {
+      notice(err.message, true);
+    } finally {
+      setPoolBusyState(false);
+      await loadPool();
+    }
+  }
+
+  async function batchRemoveAccounts() {
+    if (poolBusy || !selectedIds.size) return;
+    const n = selectedIds.size;
+    if (!window.confirm(`确定删除选中的 ${n} 个账号？\n凭据会从本机加密库里删掉，无法恢复。`)) return;
+    setPoolBusyState(true);
+    try {
+      const res = await api("remove", { ids: [...selectedIds] });
+      selectedIds.clear();
+      notice(`已删除 ${res?.count || n} 个账号`);
+    } catch (err) {
+      notice(err.message, true);
+    } finally {
+      setPoolBusyState(false);
+      await loadPool();
+    }
+  }
+
   function renderStatsView(data) {
+    lastStats = data;
     const qs = data?.quotaStats || {};
     const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
     const totalAccounts = Number(qs.total ?? accounts.length ?? 0);
@@ -581,11 +783,16 @@
       hint.textContent = "";
     }
 
+    renderHistory(data);
+    renderFailBreakdown(data);
+    renderDeadGroups(data, accounts);
+    pruneSelection(accounts);
+
     const tbody = $("statsRows");
     if (!accounts.length) {
       const tr = el("tr");
       const td = el("td", "stats-empty", "号池暂无账号，暂无额度统计明细。");
-      td.colSpan = 7;
+      td.colSpan = 8;
       tr.append(td);
       tbody.replaceChildren(tr);
       return;
@@ -595,6 +802,20 @@
     for (const account of accounts) {
       const tr = el("tr");
       const q = quotaBadgeInfo(account);
+      const pickTd = el("td", "pick");
+      const pick = el("input");
+      pick.type = "checkbox";
+      pick.checked = selectedIds.has(account.id);
+      pick.setAttribute("aria-label", "选择 " + (account.slotLabel || account.email));
+      pick.addEventListener("change", () => {
+        if (pick.checked) selectedIds.add(account.id);
+        else selectedIds.delete(account.id);
+        tr.classList.toggle("row-selected", pick.checked);
+        renderBatchBar();
+      });
+      if (pick.checked) tr.classList.add("row-selected");
+      pickTd.append(pick);
+      tr.append(pickTd);
       const nameTd = el("td");
       nameTd.append(el("strong", "", account.slotLabel || account.email));
       tr.append(nameTd);
@@ -611,6 +832,13 @@
         errSpan.title = account.lastErrorCode +
           (account.lastErrorAt ? " · " + formatTime(account.lastErrorAt, "发生在 ") : "");
         statusTd.append(errSpan);
+      }
+      // 什么时候被限流、限了多久、什么时候恢复 —— 就挂在状态后面。
+      const limitNote = limitNoteText(account);
+      if (limitNote) {
+        const limitSpan = el("span", "muted", " " + limitNote.text);
+        limitSpan.title = limitNote.title;
+        statusTd.append(limitSpan);
       }
       tr.append(statusTd);
 
@@ -877,6 +1105,23 @@
     $("syncProviders")?.addEventListener("click", syncProvidersNow);
     $("refreshStatsQuota")?.addEventListener("click", () => refreshAccounts({ all: true, quotaOnly: true }));
     $("reloadStats")?.addEventListener("click", loadStats);
+    $("pickAll")?.addEventListener("change", (event) => {
+      selectedIds.clear();
+      if (event.target.checked) {
+        for (const a of lastAccounts) if (a.id) selectedIds.add(a.id);
+      }
+      deadFilter = "";
+      if (lastStats) renderStatsView(lastStats);
+      else renderBatchBar();
+    });
+    $("batchCheck")?.addEventListener("click", batchRefreshQuota);
+    $("batchRemove")?.addEventListener("click", batchRemoveAccounts);
+    $("batchClear")?.addEventListener("click", () => {
+      selectedIds.clear();
+      deadFilter = "";
+      if (lastStats) renderStatsView(lastStats);
+      else renderBatchBar();
+    });
     window.addEventListener("focus", () => { loadPendingDraft(); });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) loadPendingDraft();

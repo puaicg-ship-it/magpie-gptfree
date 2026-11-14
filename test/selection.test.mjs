@@ -406,3 +406,89 @@ test("a caller can keep its own rotation ledger so text traffic does not skew im
   const r2 = selectPoolOrder({ accounts: [a, b], stats, credit: shared }).map((x) => x.email);
   assert.notDeepEqual(r1, r2, "同一份账本会轮转");
 });
+
+// 统计页需要「今天成功多少、失败多少、失败都是因为什么」。
+test("daily history and failure reasons are aggregated for the stats view", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "hist@example.com";
+  await recordImageCall({ email, success: true, count: 1 }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "request_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "request_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "mfa_verify_failed_403" }, { statsStore: store });
+
+  const snap = summarizePoolStats(
+    [{ email, password: "p", totp: "s", accessToken: "t" }],
+    store.state,
+  );
+  assert.equal(snap.today.success, 1);
+  assert.equal(snap.today.fail, 3);
+  assert.equal(snap.last7.success, 1);
+  assert.equal(snap.last7.fail, 3);
+  assert.deepEqual(snap.failBreakdown, { request_timeout: 2, mfa_verify_failed_403: 1 });
+  assert.equal(snap.history.length, 1, "只记了今天这一天");
+  assert.equal(snap.history[0].fail, 3);
+  assert.equal(snap.history[0].success, 1);
+});
+
+test("dead accounts are grouped by reason so the GUI can offer per-group actions", () => {
+  const authDead = account("group-auth@example.com");
+  const neverDead = account("group-never@example.com");
+  const stats = statsWith({
+    [authDead.email]: {
+      imageQuota: 25, successCalls: 1, failCalls: 1,
+      authFails: AUTH_FAIL_LIMIT, deadAt: new Date().toISOString(),
+    },
+    [neverDead.email]: { imageQuota: 25, successCalls: 0, failCalls: 40 },
+  });
+  const snap = summarizePoolStats([authDead, neverDead], stats);
+  assert.equal(snap.quotaStats.dead, 2);
+  assert.deepEqual(snap.deadBreakdown, { auth: 1, never: 1, stale: 0, marked: 0 });
+});
+
+// 「什么时候限流、什么时候恢复、限了多久、一共几次」—— 界面要能直接说清楚。
+test("a limit round records when it started, how long it lasted and when it recovered", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "limit@example.com";
+  const tag = accountSlotTag(email);
+  const resetAt = new Date(Date.now() + 3600_000).toISOString();
+
+  await recordQuotaCheck({ email, quota: 0, restoreAt: resetAt }, { statsStore: store });
+  assert.ok(store.state.accounts[tag].limitedAt, "限流开始时间被记下");
+  assert.equal(store.state.accounts[tag].limitCount, 1);
+
+  // 还是 0：同一轮，不重复计数
+  await recordQuotaCheck({ email, quota: 0 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].limitCount, 1);
+
+  // 额度回来了 = 恢复
+  await recordQuotaCheck({ email, quota: 25 }, { statsStore: store });
+  const recovered = store.state.accounts[tag];
+  assert.equal(recovered.limitedAt, null);
+  assert.ok(recovered.lastLimitedAt, "上一轮开始时间保留");
+  assert.ok(recovered.recoveredAt, "恢复时间被记下");
+
+  // 用光额度 = 又一轮限流
+  await recordQuotaCheck({ email, quota: 1 }, { statsStore: store });
+  await recordImageCall({ email, success: true, count: 1 }, { statsStore: store });
+  assert.ok(store.state.accounts[tag].limitedAt);
+  assert.equal(store.state.accounts[tag].limitCount, 2);
+
+  const snap = summarizePoolStats(
+    [{ email, password: "p", totp: "s", accessToken: "t" }],
+    store.state,
+  );
+  assert.equal(snap.accounts[0].limitCount, 2);
+  assert.ok(snap.accounts[0].limitedForMs >= 0);
+});
+
+test("an upstream rate limit starts a round even when the quota snapshot said otherwise", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "rl@example.com";
+  const tag = accountSlotTag(email);
+  await recordImageCall({
+    email, success: false, error: "quota_exhausted", rateLimited: true, retryAfter: 3600,
+  }, { statsStore: store });
+  assert.ok(store.state.accounts[tag].limitedAt);
+  assert.equal(store.state.accounts[tag].limitCount, 1);
+  assert.equal(store.state.accounts[tag].imageQuota, 0);
+});
