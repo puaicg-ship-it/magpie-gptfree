@@ -246,6 +246,11 @@ tr.row-selected { background: var(--accent-weak) }
 .notice { border: 1px solid var(--line); border-radius: 9px; background: var(--accent-weak); color: var(--text); font-size: 12px; padding: 11px 14px; margin-top: 16px }
 .notice.error { color: var(--bad); background: var(--bad-bg); border-color: var(--bad) }
 footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 11px }
+.confirm-layer { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(10, 16, 26, .45) }
+.confirm-box { width: min(420px, 100%); border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: 0 24px 60px -18px rgba(12, 20, 34, .45); padding: 20px 22px }
+.confirm-title { margin: 0 0 8px; font-size: 15px; font-weight: 650; color: var(--text) }
+.confirm-text { margin: 0 0 18px; font-size: 12.5px; line-height: 1.65; color: var(--muted) }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px }
 .hidden { display: none !important }
 @media (max-width: 720px) {
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) }

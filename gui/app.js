@@ -65,6 +65,52 @@
     n.textContent = message;
     n.className = "notice" + (error ? " error" : "");
   }
+  // Magpie 把这个页面装在沙箱 iframe 里（请求的 Origin 是 null），而沙箱没有
+  // allow-modals 时浏览器会直接丢掉原生 confirm 并返回 false ——
+  // 表现就是"点了批量删除没有任何反应"。所以确认框自己画，不用原生弹窗。
+  function confirmAction({ title, message, confirmText = "确认", danger = true }) {
+    return new Promise((resolve) => {
+      const layer = el("div", "confirm-layer");
+      layer.setAttribute("role", "dialog");
+      layer.setAttribute("aria-modal", "true");
+      const box = el("div", "confirm-box");
+      const heading = el("h3", "confirm-title", title);
+      heading.id = "confirmTitle";
+      const body = el("p", "confirm-text", message);
+      const actions = el("div", "confirm-actions");
+      const cancel = el("button", "btn secondary", "取消");
+      cancel.type = "button";
+      const ok = el("button", "btn" + (danger ? " danger" : " primary"), confirmText);
+      ok.type = "button";
+      actions.append(cancel, ok);
+      box.setAttribute("aria-labelledby", "confirmTitle");
+      box.append(heading, body, actions);
+      layer.append(box);
+      let done = false;
+      const close = (answer) => {
+        if (done) return;
+        done = true;
+        document.removeEventListener("keydown", onKey, true);
+        layer.remove();
+        resolve(answer);
+      };
+      // 只接管 Esc：Enter 交给按钮自己的默认行为，避免和 click 重复触发。
+      const onKey = (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          close(false);
+        }
+      };
+      cancel.addEventListener("click", () => close(false));
+      ok.addEventListener("click", () => close(true));
+      layer.addEventListener("click", (event) => {
+        if (event.target === layer) close(false);
+      });
+      document.addEventListener("keydown", onKey, true);
+      document.body.append(layer);
+      cancel.focus();
+    });
+  }
   function hidden(id, yes) { $(id).classList.toggle("hidden", yes); }
   function countTextLines(text) {
     let lines = 0;
@@ -910,7 +956,12 @@
   async function batchRemoveAccounts() {
     if (poolBusy || !selectedIds.size) return;
     const n = selectedIds.size;
-    if (!window.confirm(`确定删除选中的 ${n} 个账号？\n凭据会从本机加密库里删掉，无法恢复。`)) return;
+    const sure = await confirmAction({
+      title: `删除选中的 ${n} 个账号？`,
+      message: "凭据会从本机加密库里删掉，无法恢复；对应条目也会从 Magpie 的供应商列表里移除。",
+      confirmText: `删除 ${n} 个`,
+    });
+    if (!sure) return;
     setPoolBusyState(true);
     try {
       const res = await api("remove", { ids: [...selectedIds] });

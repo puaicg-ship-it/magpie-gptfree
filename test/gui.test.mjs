@@ -517,6 +517,15 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     assert(h.html.includes('value="year"'));
     assert(app.includes("HISTORY_VIEWS"));
     assert(app.includes("function historyBuckets"));
+    // 页面跑在 Magpie 的沙箱 iframe 里，原生 confirm() 会被浏览器静默丢弃
+    // （返回 false），点了批量删除就像没反应。确认框必须自己画。
+    assert(!/window\.confirm\s*\(/.test(app), "沙箱 iframe 里 window.confirm 不生效");
+    assert(!/\balert\s*\(/.test(app), "沙箱 iframe 里 alert 不生效");
+    assert(app.includes("function confirmAction"));
+    assert(app.includes("confirm-layer"));
+    const css = await (await fetch(h.base + "assets/style.css")).text();
+    assert(css.includes(".confirm-layer"));
+    assert(css.includes(".confirm-box"));
     assert(!app.includes("innerHTML"));
     assert(!app.includes("localStorage"));
   } finally { await h.close(); }
