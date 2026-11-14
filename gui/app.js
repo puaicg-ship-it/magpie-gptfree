@@ -386,6 +386,11 @@
     unauthorized: "登录失效",
     request_timeout: "请求超时",
     timeout: "请求超时",
+    worker_timeout: "生图超时（本地掐断）",
+    worker_start_failed: "Worker 启动失败",
+    worker_error: "Worker 调用失败",
+    output_too_large: "Worker 输出过大",
+    dependencies_missing: "Worker 环境缺失",
     quota_exhausted: "额度用尽",
     rate_limited: "被上游限流",
     content_policy_violation: "提示词被拒",
@@ -395,9 +400,24 @@
     pool_empty: "池里没有可用号",
     reauth_failed: "重新登录失败",
   };
+  // 鼠标悬停时给一句人话，不然只看到 worker_timeout 这种代号没法判断要不要处理。
+  const ERROR_HINTS = {
+    worker_timeout: "本地 Python worker 在预算内没返回（默认单次 35 秒、整单 55 秒），多见于上游慢、号被限流或代理抖动；只记一次慢失败并自动换号，不判死",
+    worker_start_failed: "Python worker 起不来，通常是首次安装没装完或缺少依赖",
+    dependencies_missing: "Python worker 依赖缺失，重装插件会自动补齐",
+    output_too_large: "worker 输出超过上限，多为异常返回，重试一次通常就好",
+    mfa_verify_failed_403: "登录时 MFA 被上游拦截，连续 2 次会判为失效",
+    unauthorized: "Token 失效，需要重新登录",
+    rate_limited: "被上游限流，等额度重置后自动恢复",
+    quota_exhausted: "这个号的生图额度用完了，会自动换下一个号",
+    content_policy_violation: "提示词被上游安全策略拒绝，换提示词而不是换号",
+  };
   function errorLabel(code) {
     if (!code) return "";
     return ERROR_LABELS[code] || code;
+  }
+  function errorHint(code) {
+    return ERROR_HINTS[code] || "";
   }
   function formatDuration(ms) {
     if (!Number.isFinite(ms) || ms <= 0) return "";
@@ -831,7 +851,7 @@
     for (const [code, n] of entries) {
       const row = el("div", "fail-row");
       const label = el("div", "fail-label", errorLabel(code));
-      label.title = code;
+      label.title = errorHint(code) ? `${code} — ${errorHint(code)}` : code;
       const num = el("div", "quota-num", String(n));
       const track = el("div", "fail-track");
       const fill = el("div", "fail-fill");
@@ -1121,7 +1141,8 @@
       const callsTd = el("td", "", (account.successCalls || 0) + " / " + (account.failCalls || 0));
       if (account.lastErrorCode) {
         callsTd.title = "上次失败：" + errorLabel(account.lastErrorCode) +
-          "（" + account.lastErrorCode + "）";
+          "（" + account.lastErrorCode + "）" +
+          (errorHint(account.lastErrorCode) ? "\n" + errorHint(account.lastErrorCode) : "");
       }
       tr.append(callsTd);
 

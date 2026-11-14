@@ -523,6 +523,10 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     assert(!/\balert\s*\(/.test(app), "沙箱 iframe 里 alert 不生效");
     assert(app.includes("function confirmAction"));
     assert(app.includes("confirm-layer"));
+    // 失败原因不能只显示 worker_timeout 这种代号，要有中文名 + 悬停解释。
+    assert(app.includes("生图超时（本地掐断）"));
+    assert(app.includes("function errorHint"));
+    assert(app.includes("ERROR_HINTS"));
     const css = await (await fetch(h.base + "assets/style.css")).text();
     assert(css.includes(".confirm-layer"));
     assert(css.includes(".confirm-box"));
