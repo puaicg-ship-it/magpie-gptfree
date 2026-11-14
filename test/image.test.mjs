@@ -342,6 +342,42 @@ test("executeWebImageGeneration stops rotating once maxTotalMs budget is exhaust
   assert.equal(calls, 1);
 });
 
+test("a quota-exhausted 400 fails over to the next account instead of failing the request", async () => {
+  const accounts = [1, 2].map((n) => ({
+    email: `q${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `q${n}@example.com`),
+  }));
+  const seen = [];
+  const events = [];
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    onAccountResult: (evt) => { events.push(evt); },
+    runWorker: async (payload) => {
+      seen.push(payload.access_token);
+      if (seen.length === 1) {
+        return {
+          ok: false,
+          http_status: 400,
+          error_code: "content_policy_violation",
+          error: "你已达到 Free 套餐的图像生成请求上限。上限将在 21小时 后重置，届时可创建更多图像。",
+        };
+      }
+      return { ok: true, data: [{ b64_json: "iVBORw0KGgo=" }] };
+    },
+  });
+
+  assert.equal(seen.length, 2, "the second account must be tried");
+  assert.equal(result.data.length, 1);
+  assert.equal(events[0].rateLimited, true, "quota exhaustion counts as rate limiting");
+  assert.equal(events[0].errorCode, "quota_exhausted");
+  assert.equal(events[0].retryAfter, 21 * 3600, "reset window is parsed from the message");
+  assert.equal(events[1].success, true);
+});
+
 test("pool-stats persists atomically without raw emails, JWTs or URLs and tracks cooldowns", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-stats-"));
   const statsFile = join(dir, "pool-stats.json");
