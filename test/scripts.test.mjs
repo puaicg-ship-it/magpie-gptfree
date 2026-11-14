@@ -58,11 +58,14 @@ test("--only-release 只补 Release，不动版本", async () => {
   assert(text.indexOf("缺少版本号") < start, "版本号检查应在补建分支之前");
 });
 
-test("Release 正文取自 CHANGELOG 对应版本", async () => {
+test("Release 正文优先取 docs/releases，其次 CHANGELOG", async () => {
   const text = await source();
-  assert(text.includes("## [${v}]"), "应按版本号定位 CHANGELOG 小节");
+  assert(text.includes("docs/releases/v${v}.md"), "应优先读 docs/releases/v<版本>.md");
+  assert(text.includes("## [${v}]"), "没有长文时应回落到 CHANGELOG 对应小节");
   // 422 说明 Release 已存在，重复执行不该报失败
   assert(text.includes("422"), "重复建 Release 要当成功处理");
+  // 403 多半是 fine-grained token 少了 Contents 写权限，得说清楚
+  assert(text.includes("Contents"), "403 时要提示缺 Contents 写权限");
 });
 
 test(".gitignore 兜住了 token 文件", async () => {
