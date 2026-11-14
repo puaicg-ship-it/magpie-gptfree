@@ -4,6 +4,7 @@
 
 - `main` = 上游 0.6.6，只用来跟上游对比。
 - `patch/chat-image-bridge` = **我们的代码，仓库默认分支**。Magpie 里装这个仓，默认拿到的就是它。
+- 我们自己的版本号在 `package.json` 里往上走（当前 `0.6.7`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
 
 ## 我们改了什么
 
@@ -15,7 +16,8 @@
 | `lib/chatgpt-web-image.mjs` | 单次 35s / 整单 55s 硬预算（`AbortController` + `Promise.race`，重新登录也算在预算里）；额度耗尽的 400 换号而不是整个请求失败；解析"上限将在 21小时 后重置"得到 `retryAfter`。 |
 | `lib/chatgpt-web-text.mjs` | 单次尝试压到 60s 且不超过剩余预算（worker 默认 180s 比整单 120s 还长）；文本选号排除「重新登录都过不去」的号，但**不**套用图片的熔断/额度状态，并用自己的轮转账本，不干扰图片按额度加权。 |
 | `lib/credentials.mjs` | 账号行分隔符从"3 个以上连字符"放宽到 `----` / `---` / `--` 三种，同一文件可混写（邮箱和 Base32 密钥都不含 `-`，所以 `--` 在前三列不会切错）。五字段行仍要求 `----`：JWT 签名里本身可能出现 `--`，用 `--` 切会切坏 token，这种行直接报错而不是悄悄导错。 |
-| `gui/app.js` | 额度统计页的失效徽章，区分三种失效原因并给出对应的复活提示。 |
+| `gui/app.js` | 额度统计页的失效徽章，区分三种失效原因并给出对应的复活提示；趋势图把生图与文本分开计数（`今天 生图 X 成 / Y 败 · 文本 A 成 / B 败`），估算出来的限流起点前加「约」。 |
+| `gui/dashboard.html` | 导入页的格式说明与输入框示例补上 `--` 写法。 |
 | `test/*` | 119 个用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、预算超时、额度 400 换号、额度复检守卫、文本链路、按天统计、限流生命周期、导入格式（含 2 连字符）、批量接口。 |
 
 环境变量（都有默认值，一般不用设）：
@@ -63,7 +65,7 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 没有 `#<commit>` 就是跟默认分支（`patch/chat-image-bridge`）走。这意味着：
 
 - 上游推新提交**不会再影响我们** —— Magpie 比的是这个仓的 commit，不是 `yang0/magpie-gptfree`。
-- 我们自己推了新提交，面板上会出现「有更新」，点一下或跑 `magpie plugin update` 就升到我们的新代码，**不会把改动覆盖掉**（改动本来就在仓里）。
+- 我们自己推了新提交，**要跑 `/root/gptfree-update-plugin.sh` 才会升上去**（原因见下面的警告）。
 - 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg-ship-it/magpie-gptfree#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
 
 **升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 部署机执行 `/root/gptfree-update-plugin.sh`。
@@ -89,7 +91,7 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 
 - `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
 - `/root/gptfree-update-plugin.sh` —— **升级用这个**：`bun update` 重新解析到最新提交 + 重启 + 校验。
-- `/root/fix-gptfree-chat-image.sh` —— 确保跑的是我们的代码。**现在会先看 spec**：指向本仓就跑 `magpie plugin update`，指向上游才用 `/root/gptfree-patch/` 里的镜像文件覆盖（并提示把 spec 改回来）。镜像可能落后于仓库，所以优先走更新。
+- `/root/fix-gptfree-chat-image.sh` —— 确保跑的是我们的代码。**现在会先看 spec**：指向本仓就直接 `exec /root/gptfree-update-plugin.sh`；指向上游才用 `/root/gptfree-patch/` 里的镜像文件覆盖（并提示把 spec 改回来）。镜像可能落后于仓库，所以优先走更新。
 - `/root/check-gptfree-health.sh` —— 池子容量健康检查，退出码 0/1。
 - `/root/gptfree-health-cron.sh` —— cron 包装，每 10 分钟一次；异常写 `/var/log/gptfree-health.log` 并送 syslog（`logger -t gptfree-health`），恢复时记一条 RECOVERED。
 - 备份：`/root/gptfree-backup/`（`vault-*.tar.gz` 是凭据，`plugin-dir-*.tar.gz` 是插件目录，`plugins.json.*` 是配置，`container-*.json` 是容器配置）。

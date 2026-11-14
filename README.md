@@ -12,6 +12,7 @@
 > | 请求预算 | 单次 35s / 整单 55s 硬超时，额度耗尽的 400 自动换号而不是整个请求失败 |
 > | 图片桥 | 新增 `lib/chat-image-bridge.mjs`，把 `chat/completions` 上的图片模型桥到 `/images/generations` |
 > | 统计 | 按天记成功/失败（生图与文本分开）、失败原因分布、限流起止时间 |
+> | 导入 | 分隔符 `----` / `---` / `--` 都认，同一文件可混写；五字段仍要求 `----`（见下方「支持的账号文本格式」） |
 > | 面板 | 趋势图、废号分组、多选批量操作、`GET /api/health` 健康检查 |
 >
 > 安装时请用 `https://github.com/puaicg-ship-it/magpie-gptfree`（本仓），不要用上游地址 ——
@@ -59,7 +60,7 @@
 打开 Magpie，点顶部 **「插件」** → 切到 **「发现」** → 在最底部的输入框里填入仓库地址：
 
 ```
-https://github.com/yang0/magpie-gptfree
+https://github.com/puaicg-ship-it/magpie-gptfree
 ```
 
 点右边的 **「安装」**，稍等几秒搞定。
@@ -67,7 +68,10 @@ https://github.com/yang0/magpie-gptfree
 ![在 Magpie 插件页填入 GitHub 仓库地址一键安装](docs/images/install-plugin.jpg)
 
 > [!TIP]
-> 简写 `github:yang0/magpie-gptfree` 同样可以被识别，填哪一个都行。
+> 简写 `github:puaicg-ship-it/magpie-gptfree` 同样可以被识别，填哪一个都行。
+
+> [!WARNING]
+> 填 `yang0/magpie-gptfree`（上游原版）也能装上，但那是**没有下面这些改动的原版**。
 
 ### 第 2 步：导入账号
 
@@ -78,6 +82,9 @@ https://github.com/yang0/magpie-gptfree
 3. 勾选「跳过格式错误行，仅导入有效账号」（可选），填好代理（需要的话），点 **「导入并授权入池」**。
 
 ![在 GPT号池页面选择 TXT 或直接粘贴账号后导入](docs/images/import-accounts.jpg)
+
+> [!TIP]
+> 分隔符写 `----`、`---` 或 `--` 都行：从别的工具复制出来的 `邮箱--密码--2FA密钥` 可以直接粘，不用先替换成四个连字符。完整格式见下面「[支持的账号文本格式](#支持的账号文本格式)」。
 
 全程后台自动登录，**不启动浏览器、不弹网页**。成功的账号会**自动分别同步到 Magpie 的供应商列表**，不用再手动添加。
 
