@@ -535,6 +535,12 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     // 否则几十毫秒就回来的操作看起来还是「点了没反应」。
     assert(app.includes("async function withOp"));
     assert(app.includes("OP_MIN_MS"));
+    // 检测/刷新是逐个号打上游，慢得多：必须前端分批驱动才能报 12 / 100，
+    // 一个请求等到底的话中途一个字都不会返回。
+    assert(app.includes("REFRESH_CHUNK"));
+    assert(app.includes("function mergeRefreshTotals"));
+    assert(app.includes("chunksOf(ids, REFRESH_CHUNK)"));
+    assert(app.includes("function applyRefreshRows"));
     // 禁用要能还原，不然「刷新列表」点一次就永久变灰
     assert(app.includes("wasDisabled"));
     // 行内按钮跟着 poolBusy 走：列表是在 poolBusy=true 时渲染的

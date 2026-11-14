@@ -30,6 +30,9 @@
   let poolTask = null;
   // 一次请求删/查太多号会很慢且没有反馈，按块发，每块回来就刷新一次进度。
   const BATCH_CHUNK = 20;
+  // 检测/刷新比删除慢一个数量级（每个号都要打上游），批次开小一点，
+  // 进度数字才动得起来：133 个号按 20 一批要 40 秒才跳一次，按 10 一批是 20 秒。
+  const REFRESH_CHUNK = 10;
   // 表格多选：选中的是界面 id（HMAC 后的），不是邮箱。
   const selectedIds = new Set();
   let lastAccounts = [];
@@ -681,41 +684,90 @@
     for (const btn of document.querySelectorAll(".row-act")) btn.disabled = poolBusy;
     renderBatchBar();
   }
-  async function refreshAccounts(payload) {
+  // 把一批刷新结果并进汇总：分批调用时要累加，不能只看最后一批的返回值。
+  function mergeRefreshTotals(totals, res) {
+    totals.valid += Number(res?.valid || 0);
+    totals.renewed += Number(res?.renewed || 0);
+    totals.failed += Number(res?.failed || 0);
+    totals.quotaChecked += Number(res?.quotaChecked || 0);
+    totals.quotaFailed += Number(res?.quotaFailed || 0);
+    if (res?.quotaStats) totals.quotaStats = res.quotaStats;
+    if (res?.providerConnected === true) totals.providerConnected = true;
+    return totals;
+  }
+  function applyRefreshRows(items, quotaOnly, state) {
+    for (const item of items) {
+      if (!item.quotaOk && !state.firstFail) {
+        state.firstFail = item.quotaError || item.reason || "";
+      }
+      if (quotaOnly) {
+        if (item.quotaOk) {
+          rowMessages.set(item.id, "最新生图额度：剩余 " + (item.imageQuota ?? 0));
+        } else {
+          rowMessages.set(item.id, "额度查询失败：" + (item.quotaError || item.reason || "请检查代理或网络"));
+        }
+      } else if (item.status === "valid") {
+        rowMessages.set(
+          item.id,
+          item.quotaOk === true
+            ? "上次检测：Token 有效 · 生图额度 " + (item.imageQuota ?? 0)
+            : item.quotaOk === false
+              ? "Token 有效 · 额度查询失败：" + (item.quotaError || "请检查代理")
+              : "上次检测：有效可用",
+        );
+      } else if (item.status === "renewed") {
+        rowMessages.set(
+          item.id,
+          item.quotaOk === true
+            ? "已续期 Token · 生图额度 " + (item.imageQuota ?? 0)
+            : item.quotaOk === false
+              ? "已续期 Token · 额度查询失败：" + (item.quotaError || "请检查代理")
+              : "上次刷新：已重新授权并更新 Token",
+        );
+      } else {
+        rowMessages.set(item.id, "上次刷新失败：" + (item.reason || "请检查网络或账号状态"));
+      }
+    }
+  }
+  async function refreshAccounts(payload, progress = null) {
     if (poolBusy || busy) return;
     setPoolBusyState(true);
+    const quotaOnly = payload?.quotaOnly === true;
+    const force = payload?.force === true;
     try {
       const proxy = ($("poolProxyInput").value || $("statsProxyInput")?.value || $("proxyInput").value || "").trim();
-      const res = await api("accounts/refresh", { ...payload, proxy });
-      const quotaOnly = payload?.quotaOnly === true;
-      for (const item of res.results || []) {
-        if (quotaOnly) {
-          if (item.quotaOk) {
-            rowMessages.set(item.id, "最新生图额度：剩余 " + (item.imageQuota ?? 0));
-          } else {
-            rowMessages.set(item.id, "额度查询失败：" + (item.quotaError || item.reason || "请检查代理或网络"));
-          }
-        } else if (item.status === "valid") {
-          rowMessages.set(
-            item.id,
-            item.quotaOk === true
-              ? "上次检测：Token 有效 · 生图额度 " + (item.imageQuota ?? 0)
-              : item.quotaOk === false
-                ? "Token 有效 · 额度查询失败：" + (item.quotaError || "请检查代理")
-                : "上次检测：有效可用",
-          );
-        } else if (item.status === "renewed") {
-          rowMessages.set(
-            item.id,
-            item.quotaOk === true
-              ? "已续期 Token · 生图额度 " + (item.imageQuota ?? 0)
-              : item.quotaOk === false
-                ? "已续期 Token · 额度查询失败：" + (item.quotaError || "请检查代理")
-                : "上次刷新：已重新授权并更新 Token",
-          );
-        } else {
-          rowMessages.set(item.id, "上次刷新失败：" + (item.reason || "请检查网络或账号状态"));
+      // 「全部」要前端分批：服务端一次跑完上百个号要好几分钟，中途一个字都不返回，
+      // 界面只能干等。分批之后每批回来就能把 12 / 100 刷出来。
+      let ids = null;
+      if (payload?.all === true) {
+        const source = lastAccounts.length ? lastAccounts : ((await api("accounts")).accounts || []);
+        ids = source.map((a) => a.id).filter(Boolean);
+        if (!ids.length) {
+          notice("号池里还没有账号，先导入再检测", true);
+          return;
         }
+      }
+      const totals = {
+        valid: 0, renewed: 0, failed: 0, quotaChecked: 0, quotaFailed: 0,
+        quotaStats: null, providerConnected: false, firstFail: "",
+      };
+      if (ids && ids.length > REFRESH_CHUNK) {
+        const total = ids.length;
+        const label = quotaOnly ? "正在刷新额度…" : "正在检测…";
+        let done = 0;
+        for (const chunk of chunksOf(ids, REFRESH_CHUNK)) {
+          progress?.({ label, done, total });
+          const res = await api("accounts/refresh", { ids: chunk, quotaOnly, force, proxy });
+          applyRefreshRows(res.results || [], quotaOnly, totals);
+          mergeRefreshTotals(totals, res);
+          done += chunk.length;
+          progress?.({ label, done, total });
+        }
+      } else {
+        const body = ids ? { ids, quotaOnly, force, proxy } : { ...payload, proxy };
+        const res = await api("accounts/refresh", body);
+        applyRefreshRows(res.results || [], quotaOnly, totals);
+        mergeRefreshTotals(totals, res);
       }
       if (activeTab === "stats") {
         await loadStats();
@@ -723,20 +775,20 @@
         await loadPool();
       }
       if (quotaOnly) {
-        if (res.failed > 0 && res.quotaChecked === 0) {
-          const detail = res.results?.[0]?.quotaError || res.results?.[0]?.reason || "请检查代理或账号状态";
-          notice("额度检测失败：" + res.failed + " 个账号查询失败（" + detail + "）", true);
+        if (totals.failed > 0 && totals.quotaChecked === 0) {
+          const detail = totals.firstFail || "请检查代理或账号状态";
+          notice("额度检测失败：" + totals.failed + " 个账号查询失败（" + detail + "）", true);
         } else {
-          const totalQ = res.quotaStats?.totalQuota ?? 0;
-          notice(`额度检测完成：已更新 ${res.quotaChecked ?? (res.valid + res.renewed)} 个账号 · 当前可用总剩余额度 ${totalQ}${res.failed ? ` · 失败 ${res.failed} 个` : ""}`);
+          const totalQ = totals.quotaStats?.totalQuota ?? 0;
+          notice(`额度检测完成：已更新 ${totals.quotaChecked ?? (totals.valid + totals.renewed)} 个账号 · 当前可用总剩余额度 ${totalQ}${totals.failed ? ` · 失败 ${totals.failed} 个` : ""}`);
         }
-      } else if (res.failed > 0 && res.renewed === 0 && res.valid === 0) {
-        notice("检测完成：" + res.failed + " 个账号刷新失败，请检查代理或账号状态", true);
-      } else if (res.quotaFailed > 0) {
-        notice(`检测完成：有效 ${res.valid} · 续期 ${res.renewed}（其中 ${res.quotaFailed} 个账号生图额度查询失败，请检查 chatgpt.com 代理连通性）`);
+      } else if (totals.failed > 0 && totals.renewed === 0 && totals.valid === 0) {
+        notice("检测完成：" + totals.failed + " 个账号刷新失败，请检查代理或账号状态", true);
+      } else if (totals.quotaFailed > 0) {
+        notice(`检测完成：有效 ${totals.valid} · 续期 ${totals.renewed}（其中 ${totals.quotaFailed} 个账号生图额度查询失败，请检查 chatgpt.com 代理连通性）`);
       } else {
-        const extra = res.quotaChecked > 0 ? ` · 生图总剩余额度 ${res.quotaStats?.totalQuota ?? 0}` : "";
-        notice(`检测完成：有效 ${res.valid} 个 · 续期 ${res.renewed} 个 · 失败 ${res.failed} 个${extra}`);
+        const extra = totals.quotaChecked > 0 ? ` · 生图总剩余额度 ${totals.quotaStats?.totalQuota ?? 0}` : "";
+        notice(`检测完成：有效 ${totals.valid} 个 · 续期 ${totals.renewed} 个 · 失败 ${totals.failed} 个${extra}`);
       }
     } catch (err) {
       notice(err.message, true);
@@ -1084,7 +1136,7 @@
     let done = 0, ok = 0, bad = 0;
     await withOp("poolBatchCheck", "检测中…", async (progress) => {
       try {
-        for (const chunk of chunksOf(ids)) {
+        for (const chunk of chunksOf(ids, REFRESH_CHUNK)) {
           progress({ label: "正在检测额度…", done, total });
           const res = await api("accounts/refresh", { ids: chunk, quotaOnly: true, proxy: statsProxy() });
           for (const item of res.results || []) {
@@ -1618,11 +1670,11 @@
     $("refreshAccounts").addEventListener("click", () =>
       withOp("refreshAccounts", "刷新中…", loadPool));
     $("refreshAllPool").addEventListener("click", () =>
-      withOp("refreshAllPool", "检测中…", () => refreshAccounts({ all: true })));
+      withOp("refreshAllPool", "检测中…", (progress) => refreshAccounts({ all: true }, progress)));
     $("syncProviders")?.addEventListener("click", () =>
       withOp("syncProviders", "同步中…", syncProvidersNow));
     $("refreshStatsQuota")?.addEventListener("click", () =>
-      withOp("refreshStatsQuota", "刷新中…", () => refreshAccounts({ all: true, quotaOnly: true })));
+      withOp("refreshStatsQuota", "刷新中…", (progress) => refreshAccounts({ all: true, quotaOnly: true }, progress)));
     $("reloadStats")?.addEventListener("click", () =>
       withOp("reloadStats", "读取中…", loadStats));
     $("pickAll")?.addEventListener("change", (event) => {
