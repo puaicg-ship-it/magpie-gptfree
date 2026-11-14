@@ -208,6 +208,37 @@ th.pick, td.pick { width: 34px; text-align: center }
 th.pick input, td.pick input { width: 15px; height: 15px; cursor: pointer }
 tr.row-selected { background: var(--accent-weak) }
 
+/* 账号池：筛选 / 分组 / 排序 */
+.pool-filter { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px }
+.pool-search { flex: 1 1 180px; min-width: 150px; max-width: 300px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 12px }
+.pool-search:focus { border-color: var(--accent); outline: none }
+.filter-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap }
+.filter-field select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 12px; min-height: 32px }
+.filter-field select:focus { border-color: var(--accent); outline: none }
+.pool-group { border-bottom: 1px solid var(--line) }
+.pool-group:last-child { border-bottom: 0 }
+.pool-group-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 15px; background: var(--bg); color: var(--text); font-size: 12.5px; flex-wrap: wrap }
+.pool-group-head:hover { background: var(--accent-weak) }
+.pool-group-toggle { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 5px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; flex-wrap: wrap; cursor: pointer }
+.pool-group-toggle strong { font-weight: 680 }
+.pool-group-caret { color: var(--muted); width: 12px; font-size: 11px }
+.pool-group-count { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--accent); background: var(--accent-weak); border-radius: 99px; padding: 0 7px; font-size: 11px }
+.pool-group-pick { margin-left: auto; font-size: 11px; color: var(--accent); border: 1px solid var(--line); border-radius: 99px; padding: 1px 9px; background: var(--card); cursor: pointer; white-space: nowrap }
+.pool-group-pick:hover { border-color: var(--accent) }
+.pool-group.collapsed .pool-group-body { display: none }
+.pool-pick { display: flex; align-items: center; padding-right: 2px }
+.pool-pick input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent) }
+.account-row.row-selected { background: var(--accent-weak) }
+.batch-bar #poolBatchCount { font-weight: 700; color: var(--text) }
+
+/* 表格可排序表头 */
+.sort-th { border: 0; background: transparent; color: inherit; font: inherit; font-weight: 620; padding: 0; cursor: pointer; white-space: nowrap }
+.sort-th:hover { color: var(--accent) }
+.sort-th::after { content: " ↕"; font-size: 10px; opacity: .32 }
+.sort-th.sorted { color: var(--accent) }
+.sort-th.sorted::after { content: " ↑"; font-size: 10px; opacity: 1 }
+.sort-th.sorted.desc::after { content: " ↓" }
+
 .empty { text-align: center; padding: 40px 24px; color: var(--muted); font-size: 13px }
 .notice { border: 1px solid var(--line); border-radius: 9px; background: var(--accent-weak); color: var(--text); font-size: 12px; padding: 11px 14px; margin-top: 16px }
 .notice.error { color: var(--bad); background: var(--bad-bg); border-color: var(--bad) }

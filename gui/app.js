@@ -15,14 +15,6 @@
     unknown: "Token 有效期未知",
     not_yet_valid: "Token 尚未生效",
   };
-  const poolTokenBadges = {
-    unexpired_unverified: { cls: "good", text: "Token 有效（待请求确认）" },
-    expired: { cls: "warn", text: "Token 已过期（会自动重登）" },
-    missing: { cls: "bad", text: "无可用 Token" },
-    unknown: { cls: "warn", text: "Token 状态未知" },
-    not_yet_valid: { cls: "warn", text: "Token 尚未生效" },
-    invalid: { cls: "bad", text: "Token 格式异常" },
-  };
   const stateLabels = {
     authorizing: "正在授权",
     added: "导入成功",
@@ -39,6 +31,12 @@
   let lastAccounts = [];
   let deadFilter = "";
   let lastStats = null;
+  // 账号池的筛选 / 分组 / 排序。只存在内存里：页面是沙箱页，不写任何持久存储。
+  let poolQuery = "";
+  let poolGroup = "status";
+  let poolSort = "default";
+  let statsSort = { key: "", dir: 1 };
+  const collapsedGroups = new Set();
   const jobStates = new Map();
   const rowMessages = new Map();
   // Magpie restarts its plugin host about once an hour (community plugin
@@ -474,6 +472,93 @@
       title: "尚未向 chatgpt.com 查询生图额度，点击检测/刷新获取真实额度",
     };
   }
+  /**
+   * Token 到底"确认"到什么程度 —— 这里只认上游的真实反馈，不拿本地解码当结论。
+   *
+   * 本地能做的只有解码 JWT 看 exp，那只说明"时间上没过期"，不代表 OpenAI 接受它。
+   * 真正的证据只有两种：
+   *   1. 额度检测真的读回了数字（读 chatgpt.com 额度必须带 Token 认证）；
+   *   2. 这个号真的成功出过图。
+   * 两种证据都要晚于最近一次换 Token（重新登录会刷新 updatedAt），否则说明
+   * 证据是上一个 Token 的，新的还没验证过。
+   */
+  function tokenBadge(account) {
+    if (!account.hasAccess || account.tokenState === "missing")
+      return { cls: "bad", text: "无可用 Token", confirmed: false, title: "号池里没有这个账号的 access_token，需要重新导入或重新登录" };
+    if (account.tokenState === "invalid")
+      return { cls: "bad", text: "Token 格式异常", confirmed: false, title: "本地解析不出这个 JWT 的结构，需要重新登录" };
+    if (account.tokenState === "expired")
+      return { cls: "warn", text: "Token 已过期 · 会自动重登", confirmed: false, title: "本地 JWT 的 exp 已经过了；下次派活会先自动重新登录换新 Token" };
+    if (account.tokenState === "not_yet_valid")
+      return { cls: "warn", text: "Token 尚未生效", confirmed: false, title: "JWT 的 nbf 还没到，稍等再试" };
+
+    const quotaMs = account.quotaError ? 0 : (Date.parse(account.quotaCheckedAt || "") || 0);
+    const successMs = Date.parse(account.lastSuccessAt || "") || 0;
+    const evidenceMs = Math.max(quotaMs, successMs);
+    const issuedMs = Date.parse(account.updatedAt || "") || 0;
+    // 换 Token 和检测之间可能差几秒，留一分钟容差。
+    const confirmed = evidenceMs > 0 && evidenceMs >= issuedMs - 60000;
+    if (confirmed) {
+      const when = successMs >= quotaMs
+        ? formatTime(account.lastSuccessAt, "出图成功于 ")
+        : formatTime(account.quotaCheckedAt, "额度检测通过于 ");
+      return {
+        cls: "good",
+        text: "Token 已确认",
+        confirmed: true,
+        title: "上游真实接受过这个 Token（" + when + "），不是只解码了本地 JWT。额度够不够看右边的额度标签。",
+      };
+    }
+    const issued = issuedMs ? "这个 Token 是 " + formatTime(account.updatedAt, "") + " 换的，" : "";
+    return {
+      cls: "warn",
+      text: "Token 未确认",
+      confirmed: false,
+      title: issued + "还没被上游接受过：本地只能解出它的过期时间，不代表 OpenAI 认。" +
+        "点「检测/刷新」会真的请求一次上游，通过后这里会变成「Token 已确认」。",
+    };
+  }
+
+  // ---------- 账号池：分组 / 筛选 / 排序 ----------
+  const POOL_GROUPS = [
+    { key: "available", title: "可用", note: "有剩余生图额度" },
+    { key: "limited", title: "限流中", note: "额度为 0，等上游重置" },
+    { key: "unchecked", title: "待检测", note: "还没查过额度" },
+    { key: "error", title: "额度查询失败", note: "多半是代理或网络不通" },
+    { key: "renew", title: "需续期 / 无 Token", note: "Token 过期或缺失" },
+    { key: "dead", title: "已失效", note: "不再派活，留着只会占位" },
+  ];
+  function poolGroupKey(account) {
+    const status = account.quotaStatus;
+    if (status === "dead") return "dead";
+    if (status === "available") return "available";
+    if (status === "limited") return "limited";
+    if (status === "error") return "error";
+    if (status === "unchecked") return "unchecked";
+    return "renew";
+  }
+  function quotaNum(account) {
+    return typeof account.imageQuota === "number" ? account.imageQuota : -1;
+  }
+  const POOL_SORTS = {
+    "quota-desc": (a, b) => quotaNum(b) - quotaNum(a),
+    "quota-asc": (a, b) => quotaNum(a) - quotaNum(b),
+    recent: (a, b) => (Date.parse(b.lastSuccessAt || "") || 0) - (Date.parse(a.lastSuccessAt || "") || 0),
+    fails: (a, b) => (b.failCalls || 0) - (a.failCalls || 0),
+    label: (a, b) => String(a.slotLabel || "").localeCompare(String(b.slotLabel || "")),
+  };
+  function visibleAccounts(accounts) {
+    const q = poolQuery.trim().toLowerCase();
+    const rows = q
+      ? accounts.filter((a) =>
+        String(a.slotLabel || "").toLowerCase().includes(q) ||
+        String(a.slotTag || "").toLowerCase().includes(q))
+      : accounts.slice();
+    const cmp = POOL_SORTS[poolSort];
+    // 排序是稳定排序，同值时保持后端给的顺序。
+    if (cmp) rows.sort(cmp);
+    return rows;
+  }
   function setPoolBusyState(next) {
     poolBusy = next;
     const hasRows = !!$("poolList")?.querySelector(".account-row");
@@ -481,6 +566,7 @@
     if ($("syncProviders")) $("syncProviders").disabled = poolBusy;
     if ($("refreshStatsQuota")) $("refreshStatsQuota").disabled = poolBusy || !hasRows;
     if ($("reloadStats")) $("reloadStats").disabled = poolBusy;
+    renderBatchBar();
   }
   async function refreshAccounts(payload) {
     if (poolBusy || busy) return;
@@ -687,6 +773,7 @@
   }
 
   // ---------- 多选批量 ----------
+  // 两个页面共用同一份选择：账号池列表和额度统计表勾的是同一批号。
   function pruneSelection(accounts) {
     lastAccounts = accounts;
     const ids = new Set(accounts.map((a) => a.id).filter(Boolean));
@@ -696,17 +783,37 @@
     renderBatchBar();
   }
 
+  function selectableInPool() {
+    return visibleAccounts(lastAccounts).filter((a) => a.id).map((a) => a.id);
+  }
+
   function renderBatchBar() {
-    const bar = $("batchBar");
-    if (!bar) return;
     const n = selectedIds.size;
-    bar.classList.toggle("hidden", n === 0);
-    $("batchCount").textContent = `已选 ${n} 个`;
+    const label = `已选 ${n} 个`;
+    const busy = poolBusy;
+    // 额度统计页：表头复选框 + 批量栏
+    const bar = $("batchBar");
+    if (bar) bar.classList.toggle("hidden", !lastAccounts.length);
+    if ($("batchCount")) $("batchCount").textContent = label;
     const all = $("pickAll");
     if (all) {
       const selectable = lastAccounts.filter((a) => a.id).length;
       all.checked = n > 0 && n === selectable;
       all.indeterminate = n > 0 && !all.checked;
+    }
+    // 账号池页：批量栏 + 全选当前列表
+    if ($("poolBatchCount")) $("poolBatchCount").textContent = label;
+    const poolAll = $("poolPickAll");
+    if (poolAll) {
+      const poolIds = selectableInPool();
+      const picked = poolIds.filter((id) => selectedIds.has(id)).length;
+      poolAll.checked = picked > 0 && picked === poolIds.length;
+      poolAll.indeterminate = picked > 0 && !poolAll.checked;
+      poolAll.disabled = busy || !poolIds.length;
+    }
+    for (const id of ["batchCheck", "batchRemove", "batchClear", "poolBatchCheck", "poolBatchRemove", "poolBatchClear"]) {
+      const button = $(id);
+      if (button) button.disabled = busy || n === 0;
     }
   }
 
@@ -750,10 +857,38 @@
     }
   }
 
+  // ---------- 额度统计表排序 ----------
+  const STATUS_RANK = {
+    available: 0, limited: 1, unchecked: 2, error: 3, needs_renew: 4, unavailable: 5, dead: 6,
+  };
+  const STATS_SORTS = {
+    label: (a, b) => String(a.slotLabel || "").localeCompare(String(b.slotLabel || "")),
+    plan: (a, b) => String(a.planType || "").localeCompare(String(b.planType || "")),
+    status: (a, b) => (STATUS_RANK[a.quotaStatus] ?? 9) - (STATUS_RANK[b.quotaStatus] ?? 9),
+    quota: (a, b) => quotaNum(a) - quotaNum(b),
+    calls: (a, b) => (a.successCalls || 0) - (b.successCalls || 0),
+    checked: (a, b) => (Date.parse(a.quotaCheckedAt || "") || 0) - (Date.parse(b.quotaCheckedAt || "") || 0),
+  };
+  function sortedForStats(accounts) {
+    const cmp = STATS_SORTS[statsSort.key];
+    if (!cmp) return accounts;
+    return accounts.slice().sort((a, b) => cmp(a, b) * statsSort.dir);
+  }
+  function markSortHeaders() {
+    for (const button of document.querySelectorAll(".sort-th")) {
+      const on = button.dataset.sort === statsSort.key;
+      button.classList.toggle("sorted", on);
+      button.classList.toggle("desc", on && statsSort.dir < 0);
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
   function renderStatsView(data) {
     lastStats = data;
     const qs = data?.quotaStats || {};
     const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
+    const tableRows = sortedForStats(accounts);
+    markSortHeaders();
     const totalAccounts = Number(qs.total ?? accounts.length ?? 0);
     const activeAccounts = Number(qs.active ?? 0);
     const limitedAccounts = Number(qs.limited ?? 0);
@@ -818,7 +953,7 @@
     }
 
     const rows = [];
-    for (const account of accounts) {
+    for (const account of tableRows) {
       const tr = el("tr");
       const q = quotaBadgeInfo(account);
       const pickTd = el("td", "pick");
@@ -898,99 +1033,181 @@
     }
     tbody.replaceChildren(...rows);
   }
+  function poolAccountRow(account) {
+    const item = el("div", "account-row");
+    const pickWrap = el("label", "pool-pick");
+    const pick = el("input");
+    pick.type = "checkbox";
+    pick.checked = selectedIds.has(account.id);
+    pick.setAttribute("aria-label", "选择 " + (account.slotLabel || account.email));
+    pick.addEventListener("change", () => {
+      if (pick.checked) selectedIds.add(account.id);
+      else selectedIds.delete(account.id);
+      item.classList.toggle("row-selected", pick.checked);
+      renderBatchBar();
+    });
+    pickWrap.append(pick);
+    if (pick.checked) item.classList.add("row-selected");
+    item.append(pickWrap);
+
+    const left = el("div", "account-main");
+    const head = el("div", "account-head");
+    head.append(el("strong", "", account.slotLabel || account.email));
+    const badge = tokenBadge(account);
+    const badgePill = el("span", "pill " + badge.cls, badge.text);
+    badgePill.title = badge.title;
+    head.append(badgePill);
+    if (account.planType) {
+      head.append(el("span", "pill plan", account.planType.toUpperCase()));
+    }
+    left.append(head);
+
+    const q = quotaBadgeInfo(account);
+    const usagePart = (account.successCalls || account.failCalls)
+      ? `成功 ${account.successCalls || 0} / 失败 ${account.failCalls || 0}`
+      : "";
+    const resetPart = account.quotaResetAt ? formatTime(account.quotaResetAt, "预计恢复 ") : "";
+    const checkedPart = account.quotaCheckedAt ? formatTime(account.quotaCheckedAt, "额度检测于 ") : "";
+    const errPart = account.quotaError ? "额度错误：" + account.quotaError : "";
+    const sub = [
+      formatTime(account.updatedAt),
+      checkedPart,
+      resetPart,
+      usagePart,
+      errPart,
+      rowMessages.get(account.id),
+    ].filter(Boolean).join(" · ");
+    left.append(el("small", "", sub || "已在 Providers 独立入驻 · 轮询与故障转移就绪 · Token 无明文显示"));
+    item.append(left);
+
+    const side = el("div", "account-side");
+    const quotaPill = el("span", "quota-pill " + q.cls, q.pillText);
+    if (q.title) quotaPill.title = q.title;
+    side.append(quotaPill);
+
+    const controls = el("div", "account-buttons");
+    const refresh = el("button", "btn secondary small", "检测/刷新");
+    refresh.type = "button";
+    refresh.disabled = poolBusy;
+    refresh.addEventListener("click", async () => {
+      refresh.textContent = "处理中…";
+      await refreshAccounts({ id: account.id, force: account.tokenState !== "unexpired_unverified" });
+    });
+    const remove = el("button", "btn secondary small", "移除");
+    remove.type = "button";
+    let confirming = false;
+    remove.addEventListener("click", async () => {
+      if (!confirming) {
+        confirming = true;
+        remove.classList.add("danger");
+        remove.textContent = "确认移除";
+        return;
+      }
+      remove.disabled = true;
+      try {
+        const removed = await api("remove", { id: account.id });
+        rowMessages.delete(account.id);
+        await loadPool();
+        if (removed.connectionError)
+          notice("账号已移除，但 Magpie 供应商状态同步失败", true);
+        else if (removed.providerConnected === false)
+          notice("最后一个账号已移除，GPT号池已自动断开");
+        else
+          notice("账号已从本地号池移除，其余账号将继续轮询工作");
+      }
+      catch (err) { notice(err.message, true); remove.disabled = false; }
+    });
+    controls.append(refresh, remove);
+    side.append(controls);
+    item.append(side);
+    return item;
+  }
+
+  function renderPoolGroup(group, items) {
+    const wrap = el("section", "pool-group");
+    const collapsed = collapsedGroups.has(group.key);
+    wrap.classList.toggle("collapsed", collapsed);
+
+    const head = el("div", "pool-group-head");
+    const toggle = el("button", "pool-group-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    toggle.title = collapsed ? "展开这一组" : "折叠这一组";
+    toggle.append(el("span", "pool-group-caret", collapsed ? "▸" : "▾"));
+    toggle.append(el("strong", "", group.title));
+    toggle.append(el("span", "pool-group-count", items.length));
+    toggle.append(el("span", "muted tiny", group.note));
+    toggle.addEventListener("click", () => {
+      if (collapsedGroups.has(group.key)) collapsedGroups.delete(group.key);
+      else collapsedGroups.add(group.key);
+      renderPoolView(lastPoolData);
+    });
+    head.append(toggle);
+
+    const pickGroup = el("button", "pool-group-pick");
+    pickGroup.type = "button";
+    pickGroup.textContent = "选本组";
+    pickGroup.title = "把这一组的 " + items.length + " 个账号加入选择";
+    pickGroup.addEventListener("click", () => {
+      for (const a of items) if (a.id) selectedIds.add(a.id);
+      renderPoolView(lastPoolData);
+      if (lastStats) renderStatsView(lastStats);
+    });
+    head.append(pickGroup);
+
+    wrap.append(head);
+    const body = el("div", "pool-group-body");
+    for (const account of items) body.append(poolAccountRow(account));
+    wrap.append(body);
+    return wrap;
+  }
+
+  let lastPoolData = null;
   function renderPoolView(data) {
+    lastPoolData = data;
+    const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
     $("poolCount").textContent = data.total;
-    const summary = data.summary || { total: data.total, valid: 0, needsRenew: 0 };
     const qs = data.quotaStats || {};
-    if (data.total) {
+    if (accounts.length) {
+      const confirmed = accounts.filter((a) => tokenBadge(a).confirmed).length;
       const quotaSeg = qs.checked > 0
         ? ` · 生图可用 ${qs.active ?? 0} · 限流 ${qs.limited ?? 0} · 剩余额度 ${qs.totalQuota ?? 0}`
         : ` · 生图额度待检测`;
       $("poolSummary").textContent =
-        `共 ${summary.total} 个入池账号 · 有效 ${summary.valid} · 待续期/异常 ${summary.needsRenew}${quotaSeg}`;
+        `共 ${data.total} 个入池账号 · Token 已确认 ${confirmed} · 未确认 ${accounts.length - confirmed}${quotaSeg}`;
     } else {
       $("poolSummary").textContent = "号池暂无账号 · 请先导入账号";
     }
+
     const list = $("poolList");
     list.replaceChildren();
-    if (!data.accounts.length) {
+    const rows = visibleAccounts(accounts);
+    const info = $("poolFilterInfo");
+    if (info) {
+      info.textContent = accounts.length && rows.length !== accounts.length
+        ? `筛选出 ${rows.length} / ${accounts.length} 个`
+        : "";
+    }
+    if (!accounts.length) {
       list.append(el("div", "empty", "独立号池暂无账号。请在「批量导入」选择 TXT 文件或粘贴账号批量导入。"));
       setPoolBusyState(poolBusy);
       return;
     }
-    for (const account of data.accounts) {
-      const item = el("div", "account-row");
-      const left = el("div", "account-main");
-      const head = el("div", "account-head");
-      head.append(el("strong", "", account.slotLabel || account.email));
-      const badge = poolTokenBadges[account.tokenState] || (account.hasAccess
-        ? poolTokenBadges.unexpired_unverified
-        : poolTokenBadges.missing);
-      head.append(el("span", "pill " + badge.cls, badge.text));
-      if (account.planType) {
-        head.append(el("span", "pill plan", account.planType.toUpperCase()));
+    if (!rows.length) {
+      list.append(el("div", "empty", "没有匹配的账号 · 换个关键词试试"));
+      setPoolBusyState(poolBusy);
+      return;
+    }
+
+    if (poolGroup === "none") {
+      for (const account of rows) list.append(poolAccountRow(account));
+    } else {
+      const buckets = new Map(POOL_GROUPS.map((g) => [g.key, []]));
+      for (const account of rows) buckets.get(poolGroupKey(account)).push(account);
+      for (const group of POOL_GROUPS) {
+        const items = buckets.get(group.key);
+        if (items.length) list.append(renderPoolGroup(group, items));
       }
-      left.append(head);
-
-      const q = quotaBadgeInfo(account);
-      const usagePart = (account.successCalls || account.failCalls)
-        ? `成功 ${account.successCalls || 0} / 失败 ${account.failCalls || 0}`
-        : "";
-      const resetPart = account.quotaResetAt ? formatTime(account.quotaResetAt, "预计恢复 ") : "";
-      const checkedPart = account.quotaCheckedAt ? formatTime(account.quotaCheckedAt, "额度检测于 ") : "";
-      const errPart = account.quotaError ? "额度错误：" + account.quotaError : "";
-      const sub = [
-        formatTime(account.updatedAt),
-        checkedPart,
-        resetPart,
-        usagePart,
-        errPart,
-        rowMessages.get(account.id),
-      ].filter(Boolean).join(" · ");
-      left.append(el("small", "", sub || "已在 Providers 独立入驻 · 轮询与故障转移就绪 · Token 无明文显示"));
-      item.append(left);
-
-      const side = el("div", "account-side");
-      const quotaPill = el("span", "quota-pill " + q.cls, q.pillText);
-      if (q.title) quotaPill.title = q.title;
-      side.append(quotaPill);
-
-      const controls = el("div", "account-buttons");
-      const refresh = el("button", "btn secondary small", "检测/刷新");
-      refresh.type = "button";
-      refresh.disabled = poolBusy;
-      refresh.addEventListener("click", async () => {
-        refresh.textContent = "处理中…";
-        await refreshAccounts({ id: account.id, force: account.tokenState !== "unexpired_unverified" });
-      });
-      const remove = el("button", "btn secondary small", "移除");
-      remove.type = "button";
-      let confirming = false;
-      remove.addEventListener("click", async () => {
-        if (!confirming) {
-          confirming = true;
-          remove.classList.add("danger");
-          remove.textContent = "确认移除";
-          return;
-        }
-        remove.disabled = true;
-        try {
-          const removed = await api("remove", { id: account.id });
-          rowMessages.delete(account.id);
-          await loadPool();
-          if (removed.connectionError)
-            notice("账号已移除，但 Magpie 供应商状态同步失败", true);
-          else if (removed.providerConnected === false)
-            notice("最后一个账号已移除，GPT号池已自动断开");
-          else
-            notice("账号已从本地号池移除，其余账号将继续轮询工作");
-        }
-        catch (err) { notice(err.message, true); remove.disabled = false; }
-      });
-      controls.append(refresh, remove);
-      side.append(controls);
-      item.append(side);
-      list.append(item);
     }
     setPoolBusyState(poolBusy);
   }
@@ -1132,6 +1349,7 @@
       deadFilter = "";
       if (lastStats) renderStatsView(lastStats);
       else renderBatchBar();
+      if (lastPoolData) renderPoolView(lastPoolData);
     });
     $("batchCheck")?.addEventListener("click", batchRefreshQuota);
     $("batchRemove")?.addEventListener("click", batchRemoveAccounts);
@@ -1140,7 +1358,47 @@
       deadFilter = "";
       if (lastStats) renderStatsView(lastStats);
       else renderBatchBar();
+      if (lastPoolData) renderPoolView(lastPoolData);
     });
+    // 账号池：搜索 / 分组 / 排序 / 全选当前列表 / 批量
+    $("poolSearch")?.addEventListener("input", (event) => {
+      poolQuery = event.target.value || "";
+      if (lastPoolData) renderPoolView(lastPoolData);
+    });
+    $("poolGroupSelect")?.addEventListener("change", (event) => {
+      poolGroup = event.target.value === "none" ? "none" : "status";
+      collapsedGroups.clear();
+      if (lastPoolData) renderPoolView(lastPoolData);
+    });
+    $("poolSortSelect")?.addEventListener("change", (event) => {
+      poolSort = POOL_SORTS[event.target.value] ? event.target.value : "default";
+      if (lastPoolData) renderPoolView(lastPoolData);
+    });
+    $("poolPickAll")?.addEventListener("change", (event) => {
+      const ids = selectableInPool();
+      if (event.target.checked) for (const id of ids) selectedIds.add(id);
+      else for (const id of ids) selectedIds.delete(id);
+      if (lastPoolData) renderPoolView(lastPoolData);
+      if (lastStats) renderStatsView(lastStats);
+    });
+    $("poolBatchCheck")?.addEventListener("click", batchRefreshQuota);
+    $("poolBatchRemove")?.addEventListener("click", batchRemoveAccounts);
+    $("poolBatchClear")?.addEventListener("click", () => {
+      selectedIds.clear();
+      if (lastPoolData) renderPoolView(lastPoolData);
+      if (lastStats) renderStatsView(lastStats);
+      else renderBatchBar();
+    });
+    for (const button of document.querySelectorAll(".sort-th")) {
+      button.addEventListener("click", () => {
+        const key = button.dataset.sort;
+        if (!STATS_SORTS[key]) return;
+        statsSort = statsSort.key === key
+          ? { key, dir: -statsSort.dir }
+          : { key, dir: 1 };
+        if (lastStats) renderStatsView(lastStats);
+      });
+    }
     window.addEventListener("focus", () => { loadPendingDraft(); });
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) loadPendingDraft();

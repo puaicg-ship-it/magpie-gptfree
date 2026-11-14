@@ -120,6 +120,33 @@
           <div id="poolSummary" class="pool-summary">加载中…</div>
           <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="刷新用代理地址" placeholder="刷新代理（可选）如 http://127.0.0.1:7890">
         </div>
+        <div class="pool-filter">
+          <input id="poolSearch" type="search" class="pool-search" spellcheck="false" autocomplete="off" aria-label="搜索账号" placeholder="搜索打码邮箱或槽位号…">
+          <label class="filter-field">分组
+            <select id="poolGroupSelect">
+              <option value="status">按状态分组</option>
+              <option value="none">不分组</option>
+            </select>
+          </label>
+          <label class="filter-field">排序
+            <select id="poolSortSelect">
+              <option value="default">入池顺序</option>
+              <option value="quota-desc">额度 高→低</option>
+              <option value="quota-asc">额度 低→高</option>
+              <option value="recent">最近成功</option>
+              <option value="fails">失败次数</option>
+              <option value="label">槽位号</option>
+            </select>
+          </label>
+          <span id="poolFilterInfo" class="muted tiny"></span>
+        </div>
+        <div id="poolBatchBar" class="batch-bar">
+          <span id="poolBatchCount">已选 0 个</span>
+          <button id="poolBatchCheck" type="button" class="btn secondary small">批量检测额度</button>
+          <button id="poolBatchRemove" type="button" class="btn danger small">批量删除</button>
+          <button id="poolBatchClear" type="button" class="btn secondary small">取消选择</button>
+          <label class="inline-check"><input type="checkbox" id="poolPickAll"> <span>全选当前列表</span></label>
+        </div>
         <div id="poolList" class="pool-list"></div>
       </section>
 
@@ -192,25 +219,26 @@
         <div id="deadGroups" class="dead-groups"></div>
         <div class="section-head with-top">
           <h2>账号额度明细</h2>
-          <span id="statsTableSub" class="muted tiny">点击单行「检测额度」可向 chatgpt.com 刷新该账号最新生图额度</span>
+          <span id="statsTableSub" class="muted tiny">点击表头排序；勾选左侧复选框可批量检测或批量删除</span>
         </div>
-        <div id="batchBar" class="batch-bar hidden">
+        <div id="batchBar" class="batch-bar">
           <span id="batchCount">已选 0 个</span>
           <button id="batchCheck" type="button" class="btn secondary small">批量检测额度</button>
           <button id="batchRemove" type="button" class="btn danger small">批量删除</button>
           <button id="batchClear" type="button" class="btn secondary small">取消选择</button>
+          <span class="muted tiny">勾选表头复选框可全选</span>
         </div>
         <div class="table-wrap stats-table-wrap">
           <table>
             <thead>
               <tr>
                 <th class="pick"><input id="pickAll" type="checkbox" aria-label="全选账号"></th>
-                <th>账号</th>
-                <th>类型</th>
-                <th>状态</th>
-                <th>剩余生图额度</th>
-                <th>成功 / 失败</th>
-                <th>最近检测</th>
+                <th><button class="sort-th" type="button" data-sort="label">账号</button></th>
+                <th><button class="sort-th" type="button" data-sort="plan">类型</button></th>
+                <th><button class="sort-th" type="button" data-sort="status">状态</button></th>
+                <th><button class="sort-th" type="button" data-sort="quota">剩余生图额度</button></th>
+                <th><button class="sort-th" type="button" data-sort="calls">成功 / 失败</button></th>
+                <th><button class="sort-th" type="button" data-sort="checked">最近检测</button></th>
                 <th>操作</th>
               </tr>
             </thead>

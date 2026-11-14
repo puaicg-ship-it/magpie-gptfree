@@ -490,6 +490,32 @@ test("GUI exposes 额度统计 tab, per-account image quota pills, GET /api/stat
   }
 });
 
+test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章区分已确认与未确认", async () => {
+  const h = await harness({ poolRead: async () => [] });
+  try {
+    for (const id of [
+      "poolSearch", "poolGroupSelect", "poolSortSelect", "poolFilterInfo",
+      "poolBatchBar", "poolBatchCheck", "poolBatchRemove", "poolBatchClear", "poolPickAll",
+    ]) {
+      assert(h.html.includes(`id="${id}"`), "missing pool control: " + id);
+    }
+    // 批量栏不再靠勾选才出现，否则用户找不到批量删除。
+    assert(!/id="poolBatchBar"[^>]*class="batch-bar hidden"/.test(h.html));
+    assert(h.html.includes('class="sort-th"'));
+    assert(h.html.includes('data-sort="quota"'));
+    const app = await (await fetch(h.base + "assets/app.js")).text();
+    assert(app.includes("function tokenBadge"));
+    assert(app.includes("Token 已确认"));
+    assert(app.includes("Token 未确认"));
+    assert(!app.includes("待请求确认"), "含糊的旧文案应删除");
+    assert(app.includes("function poolGroupKey"));
+    assert(app.includes("function visibleAccounts"));
+    assert(app.includes("function sortedForStats"));
+    assert(!app.includes("innerHTML"));
+    assert(!app.includes("localStorage"));
+  } finally { await h.close(); }
+});
+
 test("GUI keeps a page usable across a plugin-host restart (persisted capability)", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-session-"));
   const sessionFile = join(dir, "gui-sessions.json");
