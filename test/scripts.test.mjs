@@ -93,6 +93,14 @@ test("Release 正文优先取 docs/releases，其次 CHANGELOG", async () => {
   assert(text.includes("Contents"), "403 时要提示缺 Contents 写权限");
 });
 
+test("补建旧版本不会抢走 GitHub 的 Latest", async () => {
+  // GitHub 的 Latest 按创建时间算，不按版本号。批量补建 0.8.6 → 0.8.4 时，
+  // 最后建的 0.8.4 会被标成 Latest，仓库首页就显示旧版本。实测踩过一次。
+  const text = await source();
+  assert(text.includes("make_latest"), "创建 Release 必须显式指定 make_latest");
+  assert(text.includes("--sort=-v:refname"), "要按版本号排序找出最高 tag，不能按创建顺序");
+});
+
 test(".gitignore 兜住了 token 文件", async () => {
   // 万一有人把 token 放进仓库目录，git add -A 也不能把它带走。
   const ignore = await readFile(new URL("../.gitignore", import.meta.url), "utf8");
