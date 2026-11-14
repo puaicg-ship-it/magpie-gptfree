@@ -378,6 +378,27 @@ test("a quota-exhausted 400 fails over to the next account instead of failing th
   assert.equal(events[1].success, true);
 });
 
+test("a worker that never returns is cut by the hard budget", async () => {
+  const accounts = [1, 2].map((n) => ({
+    email: `h${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `h${n}@example.com`),
+  }));
+  const started = Date.now();
+  await assert.rejects(
+    executeWebImageGeneration({
+      accounts,
+      request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+      reauthenticate: async (a) => a,
+      maxTotalMs: 2_500,
+      runWorker: () => new Promise(() => {}),
+    }),
+    (err) => err.status === 504 && /超时/.test(err.message),
+  );
+  assert(Date.now() - started < 5_000, "the budget must end the request");
+});
+
 test("pool-stats persists atomically without raw emails, JWTs or URLs and tracks cooldowns", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-stats-"));
   const statsFile = join(dir, "pool-stats.json");
