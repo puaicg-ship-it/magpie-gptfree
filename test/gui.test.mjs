@@ -575,3 +575,45 @@ test("GET /api/health answers 503 when the pool drops below the usable threshold
     await h.close();
   }
 });
+
+test("GUI removes and re-checks a whole selection in one request", async () => {
+  const store = createInMemoryStatsStore();
+  const records = [
+    { email: "a@example.com", accessToken: future(), totp: seed, password: "s" },
+    { email: "b@example.com", accessToken: future(), totp: seed, password: "s" },
+    { email: "c@example.com", accessToken: future(), totp: seed, password: "s" },
+  ];
+  const removed = [];
+  const refreshed = [];
+  const h = await harness({
+    poolRead: async () => records.filter((r) => !removed.includes(r.email)),
+    poolRemove: async (email) => { removed.push(email); },
+    statsStore: store,
+    onPoolChange: async () => ({ connected: true }),
+    refreshAccount: async (row) => {
+      refreshed.push(row.email);
+      return { ok: true, status: "valid", renewed: false, tokenState: "unexpired_unverified" };
+    },
+  });
+  try {
+    const listed = await h.api("accounts");
+    const ids = listed.json.accounts.map((a) => a.id);
+    assert.equal(ids.length, 3);
+
+    // 勾两个复检：一次请求，不是两次。
+    const check = await h.api("accounts/refresh", { ids: ids.slice(0, 2), quotaOnly: true });
+    assert.equal(check.status, 200);
+    assert.deepEqual(refreshed.sort(), ["a@example.com", "b@example.com"]);
+
+    // 勾两个删除：返回删掉的条数，第三个还在。
+    const gone = await h.api("remove", { ids: ids.slice(0, 2) });
+    assert.equal(gone.status, 200);
+    assert.equal(gone.json.count, 2);
+    assert.deepEqual(removed.sort(), ["a@example.com", "b@example.com"]);
+    assert.equal((await h.api("accounts")).json.total, 1);
+
+    // 空的 ids 不能被当成「全删」。
+    assert.equal((await h.api("remove", { ids: [] })).status, 400);
+    assert.equal(removed.length, 2);
+  } finally { await h.close(); }
+});
