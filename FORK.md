@@ -65,7 +65,12 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 - 我们自己推了新提交，面板上会出现「有更新」，点一下或跑 `magpie plugin update` 就升到我们的新代码，**不会把改动覆盖掉**（改动本来就在仓里）。
 - 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg-ship-it/magpie-gptfree#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
 
-**升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 面板点更新（或 `magpie plugin update`）→ 重启 Magpie。
+**升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 部署机执行 `/root/gptfree-update-plugin.sh`。
+
+> ⚠️ 别用 `magpie plugin update`。它走 bun 的「按 lockfile 重装」路径：同一个 URL 已经解析过时
+> 不会重新去 GitHub 取，会静默停在旧 commit 上（实测推了新提交后它仍打印 `✓ plugins updated`，
+> 实际没动）。`bun update <包名>` 才会重新解析。`gptfree-update-plugin.sh` 做的就是
+> `bun update magpie-gptfree` + 重启 + 校验，一条命令搞定。
 
 ## 账号数据在哪（重装插件不会动）
 
@@ -82,6 +87,7 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 部署机的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptfree`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptfree`）。
 
 - `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
+- `/root/gptfree-update-plugin.sh` —— **升级用这个**：`bun update` 重新解析到最新提交 + 重启 + 校验。
 - `/root/fix-gptfree-chat-image.sh` —— 确保跑的是我们的代码。**现在会先看 spec**：指向本仓就跑 `magpie plugin update`，指向上游才用 `/root/gptfree-patch/` 里的镜像文件覆盖（并提示把 spec 改回来）。镜像可能落后于仓库，所以优先走更新。
 - `/root/check-gptfree-health.sh` —— 池子容量健康检查，退出码 0/1。
 - `/root/gptfree-health-cron.sh` —— cron 包装，每 10 分钟一次；异常写 `/var/log/gptfree-health.log` 并送 syslog（`logger -t gptfree-health`），恢复时记一条 RECOVERED。
