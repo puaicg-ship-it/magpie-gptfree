@@ -4,6 +4,12 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.8.4] - 2026-11-14
+
+### 变更
+
+- 新增发版脚本 scripts/release.sh：检查 → 升版本 → 写 CHANGELOG → tag → push →（可选）部署
+
 ## [0.8.3] - 2026-11-14
 
 ### 新增
