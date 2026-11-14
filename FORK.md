@@ -82,9 +82,12 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 部署机的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptfree`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptfree`）。
 
 - `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
-- `/root/fix-gptfree-chat-image.sh` —— 从 `/root/gptfree-patch/` 覆盖九个文件并重启。**现在只是兜底**：万一哪天有人把 spec 改回上游，或者 Magpie 重建 node_modules 时拉错了源，用它把我们的代码按回去。
-- `/root/check-gptfree-health.sh` —— 池子容量健康检查，退出码 0/1，可接 cron 告警。
-- 备份：`/root/gptfree-backup/`（`vault-*.tar.gz` 是凭据，`plugin-dir-*.tar.gz` 是插件目录，`plugins.json.*` 是配置）。
+- `/root/fix-gptfree-chat-image.sh` —— 确保跑的是我们的代码。**现在会先看 spec**：指向本仓就跑 `magpie plugin update`，指向上游才用 `/root/gptfree-patch/` 里的镜像文件覆盖（并提示把 spec 改回来）。镜像可能落后于仓库，所以优先走更新。
+- `/root/check-gptfree-health.sh` —— 池子容量健康检查，退出码 0/1。
+- `/root/gptfree-health-cron.sh` —— cron 包装，每 10 分钟一次；异常写 `/var/log/gptfree-health.log` 并送 syslog（`logger -t gptfree-health`），恢复时记一条 RECOVERED。
+- 备份：`/root/gptfree-backup/`（`vault-*.tar.gz` 是凭据，`plugin-dir-*.tar.gz` 是插件目录，`plugins.json.*` 是配置，`container-*.json` 是容器配置）。
+
+**注意**：直接改 `~/.magpie-gptfree/` 下的文件时，写完必须 `chown 65532:65532`。容器以 uid 65532 运行，属主不对的话插件读不到，表现是 `/api/health` 里所有账号变成「未检测」、额度全 0。
 
 ## 许可
 
