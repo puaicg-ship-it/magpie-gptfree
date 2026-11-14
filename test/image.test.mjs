@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   CODEX_BASE, discoverPoolModels, poolFetch, probeAccountImageQuota, refreshPoolAccount,
 } from "../lib/codex-pool.mjs";
+import { bridgeChatToImage } from "../lib/chat-image-bridge.mjs";
 import {
   IMAGE_MODEL_ID,
   buildImageModelCatalog,
@@ -106,16 +107,42 @@ test("image model catalog exposes Magpie host.js @ai-sdk/openai-compatible schem
   assert.equal(models["gpt-image-2"].api.npm, "@ai-sdk/openai-compatible");
 });
 
-test("TestModels chat/completions probe returns 400 pointing to Images API or Responses API", async () => {
-  const imgProbe = await poolFetch(CODEX_BASE + "/chat/completions", {
-    method: "POST",
-    body: JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "hi" }] }),
-  });
-  assert.equal(imgProbe.status, 400);
-  const imgJson = await imgProbe.json();
-  assert.match(imgJson.error.message, /\/v1\/images\/generations/);
-  assert.match(imgJson.error.message, /\/v1\/images\/edits/);
+test("local bridge: chat/completions with an image model goes through /images/generations", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    let forwarded = null;
+    const response = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "a corgi in space" }] }),
+      {},
+      {
+        forward: async (endpoint, body) => {
+          forwarded = { endpoint, body: JSON.parse(body) };
+          return new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+            status: 200, headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    );
 
+    assert.equal(response.status, 200);
+    assert.equal(forwarded.endpoint, "/images/generations");
+    assert.equal(forwarded.body.prompt, "a corgi in space");
+    assert.equal(forwarded.body.model, "gpt-image-2");
+
+    const body = await response.json();
+    assert.equal(body.object, "chat.completion");
+    assert.match(body.choices[0].message.content, /^!\[image\]\(https:\/\/.+\/img\/.+\.png\)$/);
+    const saved = await readFile(join(dir, body.choices[0].message.content.match(/\/img\/(.+)\)$/)[1]));
+    assert.equal(saved.length > 0, true);
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("TestModels chat/completions probe points Codex models to /v1/responses", async () => {
   const codexProbe = await poolFetch(CODEX_BASE + "/chat/completions", {
     method: "POST",
     body: JSON.stringify({ model: "gpt-5.6-luna", messages: [{ role: "user", content: "hi" }] }),
