@@ -2,9 +2,19 @@
 
 基于上游 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) **0.6.6 / commit `5ab9b99`**（分支 `upstream-0.6.6` 记录了基线）。
 
+**0.8.0 起改名为 `magpie-gptpool` 独立维护**：包名、仓库、GUI 端口（`37986` → `37990`）、页面标题都是自己的了。但下面这三样**故意不动**，改它们只有坏处没有好处：
+
+| 不动的东西 | 为什么 |
+| --- | --- |
+| provider id `gptfree-pool` / marker `gptfree-local-pool-v1` | 它是 Magpie 配置里的 key，也是客户端看到的模型名前缀（`gptfree-pool/gpt-image-2`）。改了等于把所有已保存的模型名、脚本里的模型字符串一次性作废；marker 改了会让 Magpie 里已有的账号条目变成孤儿。 |
+| 数据目录 `~/.magpie-gptfree/`（`MAGPIE_GPTFREE_HOME`） | 换目录 = 135 个号要重新导入（含 2FA 登录）。沿用旧目录，装上新插件就是原样接管。 |
+| 环境变量前缀 `MAGPIE_GPTFREE_*` | 同上，沿用即可；文档里都按旧名写。 |
+
+所以「换插件」的实际操作只有一步：**卸载旧的 `magpie-gptfree`，装新的 `magpie-gptpool`**，账号不动。两个不能同时装（端口不同能起来，但会共用同一份 vault 和账本，两边同时轮询会互相踩）。
+
 - `main` = 上游 0.6.6，只用来跟上游对比。
 - `patch/chat-image-bridge` = **我们的代码，仓库默认分支**。Magpie 里装这个仓，默认拿到的就是它。
-- 我们自己的版本号在 `package.json` 里往上走（当前 `0.7.0`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
+- 我们自己的版本号在 `package.json` 里往上走（当前 `0.8.0`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
 
 ## 我们改了什么
 
@@ -59,21 +69,21 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 **Magpie 里这个插件的安装源就是这个仓**，spec 写在 `plugins.json`：
 
 ```json
-{ "spec": "https://github.com/puaicg-ship-it/magpie-gptfree" }
+{ "spec": "https://github.com/puaicg-ship-it/magpie-gptpool" }
 ```
 
 没有 `#<commit>` 就是跟默认分支（`patch/chat-image-bridge`）走。这意味着：
 
 - 上游推新提交**不会再影响我们** —— Magpie 比的是这个仓的 commit，不是 `yang0/magpie-gptfree`。
 - 我们自己推了新提交，**要跑 `/root/gptfree-update-plugin.sh` 才会升上去**（原因见下面的警告）。
-- 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg-ship-it/magpie-gptfree#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
+- 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg-ship-it/magpie-gptpool#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
 
 **升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 部署机执行 `/root/gptfree-update-plugin.sh`。
 
 > ⚠️ 别用 `magpie plugin update`。它走 bun 的「按 lockfile 重装」路径：同一个 URL 已经解析过时
 > 不会重新去 GitHub 取，会静默停在旧 commit 上（实测推了新提交后它仍打印 `✓ plugins updated`，
 > 实际没动）。`bun update <包名>` 才会重新解析。`gptfree-update-plugin.sh` 做的就是
-> `bun update magpie-gptfree` + 重启 + 校验，一条命令搞定。
+> `bun update magpie-gptpool` + 重启 + 校验，一条命令搞定。
 
 ## 账号数据在哪（重装插件不会动）
 
@@ -81,13 +91,13 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 | --- | --- |
 | 账号凭据（加密） | `~/.magpie-gptfree/pool.enc.json` + `master.key`（容器内 `/config/home/.magpie-gptfree/`） |
 | 健康账本 | 同目录 `pool-stats.json` |
-| 插件代码 | `plugins/node_modules/magpie-gptfree/` |
+| 插件代码 | `plugins/node_modules/magpie-gptpool/` |
 
 两个目录完全独立。重装/升级插件只替换后者，`master.key` 不变，加密的账号一定能解开。唯一会丢数据的情况是删掉整个 `~/.magpie-gptfree`。
 
 ## 服务器上怎么用
 
-部署机的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptfree`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptfree`）。
+部署机的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptpool`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptpool`）。
 
 - `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
 - `/root/gptfree-update-plugin.sh` —— **升级用这个**：`bun update` 重新解析到最新提交 + 重启 + 校验。
@@ -100,4 +110,4 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 
 ## 许可
 
-上游 `package.json` 写的是 MIT，但仓库里没有 LICENSE 文件。本仓为公开仓，沿用上游 MIT 条款。
+上游 `package.json` 写的是 MIT，但仓库里没有 LICENSE 文件。本仓 0.8.0 起补了 [`LICENSE`](./LICENSE)：MIT 全文 + 上游版权行（`Copyright (c) 2026 yang0`）+ 本仓版权行。MIT 允许 fork、改名、再发布，前提就是保留这份声明。

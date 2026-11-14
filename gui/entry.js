@@ -13,7 +13,7 @@
     if (!pendingAction) {
       await new Promise((resolve) => setTimeout(resolve, 40));
     }
-    const port = Number(options?.port) || 37986;
+    const port = Number(options?.port) || 37990;
     if (!Number.isSafeInteger(port) || port < 1 || port > 65535)
       throw new Error("插件端口不合法");
     // The static page cannot fetch due to Magpie's strict CSP. Navigate the

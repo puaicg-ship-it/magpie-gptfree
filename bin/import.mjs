@@ -6,8 +6,8 @@ const showHelp = () => {
   console.log(`Magpie GPTFree standalone batch importer
 
 用法：
-  npx magpie-gptfree --file accounts.txt --dry-run
-  npx magpie-gptfree --file accounts.txt --i-own-these-accounts --mode pool
+  npx magpie-gptpool --file accounts.txt --dry-run
+  npx magpie-gptpool --file accounts.txt --i-own-these-accounts --mode pool
   node bin/import.mjs --file accounts.txt --i-own-these-accounts
 
 可选：

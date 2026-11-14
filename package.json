@@ -1,11 +1,11 @@
 {
-  "name": "magpie-gptfree",
-  "version": "0.7.1",
+  "name": "magpie-gptpool",
+  "version": "0.8.0",
   "description": "GPT号池：Magpie 多账号批量导入与号池管理插件（支持独立 HTTP 登录与画图）",
   "type": "module",
   "main": "./index.mjs",
   "bin": {
-    "magpie-gptfree": "./bin/import.mjs"
+    "magpie-gptpool": "./bin/import.mjs"
   },
   "files": [
     "index.mjs",
@@ -35,6 +35,10 @@
     "batch-import"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/puaicg-ship-it/magpie-gptpool"
+  },
   "magpie": {
     "name": "GPT号池",
     "page": {
@@ -45,7 +49,7 @@
       },
       "file": "gui/entry.html",
       "service": {
-        "port": 37986,
+        "port": 37990,
         "option": "port"
       },
       "keepAlive": true

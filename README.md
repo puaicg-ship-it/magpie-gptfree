@@ -1,8 +1,9 @@
-# GPT号池（magpie-gptfree）
+# GPT号池（magpie-gptpool）
 
-> **这是 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) 的修改版，不是上游原版。**
+> **本插件是 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) 的分支，已改名为
+> `magpie-gptpool` 独立维护。**
 >
-> 基于上游 **0.6.6 / commit `5ab9b99`**（MIT，见上游 `package.json`）。我们改了什么、
+> 基于上游 **0.6.6 / commit `5ab9b99`**（MIT，见 [LICENSE](./LICENSE)）。我们改了什么、
 > 为什么改、怎么跟上游同步，全部写在 **[FORK.md](./FORK.md)** 里，简要清单：
 >
 > | 方向 | 改动 |
@@ -15,8 +16,14 @@
 > | 导入 | 分隔符 `----` / `---` / `--` 都认，同一文件可混写；五字段仍要求 `----`（见下方「支持的账号文本格式」） |
 > | 面板 | 账号池按状态分组 + 搜索 + 排序 + 批量删除；额度表点表头排序；Token 徽章只认上游的真实反馈（`已确认` / `未确认`），不再拿本地解码 JWT 当结论 |
 >
-> 安装时请用 `https://github.com/puaicg-ship-it/magpie-gptfree`（本仓），不要用上游地址 ——
+> 安装时请用 `https://github.com/puaicg-ship-it/magpie-gptpool`（本仓），不要用上游地址 ——
 > 上游的提交会覆盖上面这些改动。细节见 FORK.md「怎么装、怎么升级」。
+>
+> **和上游的关系**：包名、仓库、GUI 端口（`37990`）、页面标题都换成了自己的；但
+> Magpie 配置里的 provider id 仍是 `gptfree-pool`，模型名仍然是
+> `gptfree-pool/gpt-image-2` 这种写法 —— 那是和 Magpie / 客户端约定的「协议身份」，
+> 改了会让所有已保存的模型名和脚本里的模型字符串一次性作废。账号库也仍在
+> `~/.magpie-gptfree/`，所以换装本插件后**原来的号池原样接管，不用重新导入**。
 
 > **3 分钟拥有一个自己的 GPT 号池：批量导入、自动轮询、生图额度一目了然。**
 >
@@ -24,7 +31,7 @@
 
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
 [![license](https://img.shields.io/badge/license-MIT-16845c)](./package.json)
-[![version](https://img.shields.io/badge/version-0.7.1-a36207)](./package.json)
+[![version](https://img.shields.io/badge/version-0.8.0-a36207)](./package.json)
 
 ---
 
@@ -60,7 +67,7 @@
 打开 Magpie，点顶部 **「插件」** → 切到 **「发现」** → 在最底部的输入框里填入仓库地址：
 
 ```
-https://github.com/puaicg-ship-it/magpie-gptfree
+https://github.com/puaicg-ship-it/magpie-gptpool
 ```
 
 点右边的 **「安装」**，稍等几秒搞定。
@@ -68,7 +75,7 @@ https://github.com/puaicg-ship-it/magpie-gptfree
 ![在 Magpie 插件页填入 GitHub 仓库地址一键安装](docs/images/install-plugin.jpg)
 
 > [!TIP]
-> 简写 `github:puaicg-ship-it/magpie-gptfree` 同样可以被识别，填哪一个都行。
+> 简写 `github:puaicg-ship-it/magpie-gptpool` 同样可以被识别，填哪一个都行。
 
 > [!WARNING]
 > 填 `yang0/magpie-gptfree`（上游原版）也能装上，但那是**没有下面这些改动的原版**。
