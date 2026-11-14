@@ -24,7 +24,7 @@
 
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
 [![license](https://img.shields.io/badge/license-MIT-16845c)](./package.json)
-[![version](https://img.shields.io/badge/version-0.6.8-a36207)](./package.json)
+[![version](https://img.shields.io/badge/version-0.6.9-a36207)](./package.json)
 
 ---
 

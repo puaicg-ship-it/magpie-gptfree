@@ -524,9 +524,9 @@
     { key: "available", title: "可用", note: "有剩余生图额度" },
     { key: "limited", title: "限流中", note: "额度为 0，等上游重置" },
     { key: "unchecked", title: "待检测", note: "还没查过额度" },
-    { key: "error", title: "额度查询失败", note: "多半是代理或网络不通" },
+    { key: "error", title: "额度查询失败", note: "多半是代理或网络不通；连续两次授权失败会自动进「已失效」" },
     { key: "renew", title: "需续期 / 无 Token", note: "Token 过期或缺失" },
-    { key: "dead", title: "已失效", note: "不再派活，留着只会占位" },
+    { key: "dead", title: "已失效", note: "不再派活；确认不要了可以整组删掉" },
   ];
   function poolGroupKey(account) {
     const status = account.quotaStatus;

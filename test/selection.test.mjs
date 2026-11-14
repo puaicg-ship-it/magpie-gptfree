@@ -229,6 +229,40 @@ test("a healthy quota check revives an account killed by failed re-auth", async 
   assert.equal(store.state.accounts[accountSlotTag(email)].consecutiveFails, 0);
 });
 
+// 额度检测里也会整条授权链路失败（Token 过期 → 重新登录 → MFA 403）。
+// 这类号再试还是这样，就该自己走到「已失效」，不用人工判断。
+test("repeated auth failures during a quota check mark the account dead", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "mfa@example.com";
+  const tag = accountSlotTag(email);
+  const error = "DSH HTTP 授权未完成（mfa_verify_failed_403）";
+
+  await recordQuotaCheck({ email, error }, { statsStore: store });
+  assert.equal(accountDeadReason(email, store.state), "", "一次失败还不能判死");
+  assert.equal(store.state.accounts[tag].authFails, 1);
+
+  await recordQuotaCheck({ email, error }, { statsStore: store });
+  assert.equal(accountDeadReason(email, store.state), "auth");
+  assert.equal(store.state.accounts[tag].quotaError, error);
+
+  // 检测通过就复活，并把连续失败清零。
+  await recordQuotaCheck({ email, quota: 3, hasImageLimit: true }, { statsStore: store });
+  assert.equal(accountDeadReason(email, store.state), "");
+  assert.equal(store.state.accounts[tag].authFails, 0);
+  assert.equal(store.state.accounts[tag].deadAt, null);
+});
+
+test("network errors during a quota check never count as auth failures", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "net@example.com";
+  const tag = accountSlotTag(email);
+  for (const error of ["connect ETIMEDOUT 104.18.32.47:443", "fetch failed", "代理不可用"]) {
+    await recordQuotaCheck({ email, error }, { statsStore: store });
+  }
+  assert.equal(store.state.accounts[tag].authFails, 0);
+  assert.equal(accountDeadReason(email, store.state), "");
+});
+
 // "失败了 84 次" 这种记录没法排查，得知道是 MFA 被拦还是超时。原因码要落盘。
 test("the last failure reason is recorded per account and cleared on success", async () => {
   const store = createInMemoryStatsStore();
