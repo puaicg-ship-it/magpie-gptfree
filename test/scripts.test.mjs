@@ -37,7 +37,16 @@ test("发版脚本覆盖发版必需的动作", async () => {
     "--dry-run",                           // 空跑
     "--save-token",                        // 钥匙串
     "gptfree-update-plugin.sh",            // 部署机
+    "LOCAL_TOKEN_FILE",                    // 允许"就放在脚本旁边"的 token 文件
   ]) {
     assert(text.includes(needle), "缺少：" + needle);
+  }
+});
+
+test(".gitignore 兜住了 token 文件", async () => {
+  // 万一有人把 token 放进仓库目录，git add -A 也不能把它带走。
+  const ignore = await readFile(new URL("../.gitignore", import.meta.url), "utf8");
+  for (const pattern of ["*.release-token", "*.token", ".magpie-gptpool-release-token"]) {
+    assert(ignore.includes(pattern), ".gitignore 缺少：" + pattern);
   }
 });

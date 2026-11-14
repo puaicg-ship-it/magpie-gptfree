@@ -116,8 +116,22 @@ cd ~/Documents/magpie-gptpool
 **GitHub token（建 Release 才需要）**：别写进仓库里的任何文件 —— 发版脚本自己会 `git add -A`
 并提交，token 会被推到公开仓库，GitHub 的 secret scanning 还会直接吊销它。正确做法是
 `./scripts/release.sh --save-token`，交互输入（不回显、不进 shell 历史），macOS 存钥匙串，
-其他平台写 `~/.magpie-gptpool-release-token`（0600）。取用优先级：
-`GITHUB_TOKEN` 环境变量 > `gh auth token` > 钥匙串 > 上面那个文件。
+其他平台写本机文件。取用优先级：
+
+```
+GITHUB_TOKEN 环境变量 > gh auth token > macOS 钥匙串
+  > scripts/.release-token（仓库内、被 .gitignore 忽略）
+  > ~/.magpie-gptpool-release-token（仓库之外）
+```
+
+想「就放在脚本旁边」就直接写文件，不用改脚本本身：
+
+```bash
+printf 'github_pat_xxx' > scripts/.release-token && chmod 600 scripts/.release-token
+```
+
+`scripts/release.sh` 是**被 git 跟踪的文件**，往里写 token 会被它自己的 `git add -A` 提交上去，
+不要那么干。
 
 ## 账号数据在哪（重装插件不会动）
 
