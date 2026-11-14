@@ -23,7 +23,7 @@
 
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
 [![license](https://img.shields.io/badge/license-MIT-16845c)](./package.json)
-[![version](https://img.shields.io/badge/version-0.6.6-a36207)](./package.json)
+[![version](https://img.shields.io/badge/version-0.6.7-a36207)](./package.json)
 
 ---
 
@@ -91,15 +91,18 @@ https://github.com/yang0/magpie-gptfree
 
 ## 支持的账号文本格式
 
-每行一条，分隔符 `----` 与 `---` 都认：
+每行一条，分隔符写 `----`、`---` 或 `--` 都认（同一文件里混着写也行）：
 
 | 格式 | 示例 | 说明 |
 | --- | --- | --- |
 | 标准三字段 | `邮箱----密码----2FA密钥` | 最常用，直接导入 |
+| 标准三字段（2 连字符） | `邮箱--密码--2FA密钥` | 从别的工具复制过来的 `--` 格式也能直接导入 |
 | 带邮箱链接 | `邮箱----密码----2FA密钥----https://mail.xxx.store/...` | 第四段当邮箱链接识别，只用前三段登录，不会访问链接 |
 | 带 Token | `邮箱----密码----2FA密钥----eyJhbGci...` | Token 有效就复用；过期会自动重新登录 |
 | 五字段带 RefreshToken | `邮箱----密码----2FA密钥----eyJhbGci...----rt_...` | 兼容卡密导出格式，多余字段不外传 |
 | 无 2FA | `邮箱----密码` | 能用，但平台额外验证时可能失败 |
+
+> 五字段（Token + RefreshToken）请用 `----` 分隔：JWT 签名里本身可能出现 `--`，用 `--` 切会把签名切断，所以这种行会直接报格式错误，不会悄悄导错。
 
 > [!WARNING]
 > **不要提交真实凭证 TXT 到 GitHub，也不要把账号密码 / 2FA / Token 粘贴到公开聊天记录。** 本仓库已忽略 `accounts*.txt`、`pool.enc.json` 等敏感文件。

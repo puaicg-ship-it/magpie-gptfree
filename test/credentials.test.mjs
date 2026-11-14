@@ -102,6 +102,62 @@ test("supports two fields as legacy input but never mistakes a link for TOTP", (
   assert.equal(parseAccounts("x@example.com----pw----https://mail.test").errors.length, 1);
 });
 
+test("accepts the 2-dash line format and mixed separators in one file", () => {
+  const line = `ev01g9um4c0@gmx-ist-cool.de--j0qOA4u8om6NKRxp--${SEED}`;
+  const a = parseAccounts(line);
+  assert.equal(a.errors.length, 0);
+  assert.equal(a.accounts.length, 1);
+  assert.equal(a.accounts[0].email, "ev01g9um4c0@gmx-ist-cool.de");
+  assert.equal(a.accounts[0].password, "j0qOA4u8om6NKRxp");
+  assert.equal(a.accounts[0].totp, SEED);
+  assert.equal(a.accounts[0].kind, "standard");
+
+  const mixed = parseAccounts([line, `b@example.com----pw----${SEED}`, `c@example.com--pw--${SEED}`].join("\n"));
+  assert.equal(mixed.errors.length, 0);
+  assert.equal(mixed.accounts.length, 3);
+  assert.deepEqual(mixed.accounts.map((x) => x.totp), [SEED, SEED, SEED]);
+});
+
+test("2-dash lines still parse the optional 4th column, and 5 columns need 3+ dashes", () => {
+  const future = jwt(Math.floor(Date.now() / 1000) + 3600);
+  const link = parseAccounts(`a@example.com--pw--${SEED}--https://mail.example.store/inbox`);
+  assert.equal(link.errors.length, 0);
+  assert.equal(link.accounts[0].kind, "mail_link");
+  assert.equal(link.accounts[0].mailUrl, "https://mail.example.store/inbox");
+
+  const token = parseAccounts(`a@example.com--pw--${SEED}--${future}`);
+  assert.equal(token.errors.length, 0);
+  assert.equal(token.accounts[0].kind, "access_token");
+  assert.equal(token.accounts[0].accessToken, future);
+
+  // `--` cannot separate a token from a refresh_token: a JWT signature may
+  // itself contain `--`, so the glued string would pass shape validation and
+  // silently produce an unusable token. Refuse instead.
+  const both = parseAccounts(`a@example.com--pw--${SEED}--${future}--rt_secret_123`);
+  assert.equal(both.accounts.length, 0);
+  assert.equal(both.errors.length, 1);
+  assert.match(both.errors[0].reason, /连字符/);
+
+  // With `----` the same 5-column line works.
+  const dashed = parseAccounts(`a@example.com----pw----${SEED}----${future}----rt_secret_123`);
+  assert.equal(dashed.errors.length, 0);
+  assert.equal(dashed.accounts[0].accessToken, future);
+  assert.equal(dashed.accounts[0].hasRefreshToken, true);
+});
+
+test("a `--` inside a password or a bad 2FA secret is reported, never silently accepted", () => {
+  // password contains `--`: the tail is not a Base32 secret -> hard error.
+  const broken = parseAccounts("a@example.com--pa--ss--short");
+  assert.equal(broken.accounts.length, 0);
+  assert.equal(broken.errors.length, 1);
+  // JWT signature that legitimately contains `--` must survive untouched.
+  const sig = "ab--cd";
+  const future = `${jwt(Math.floor(Date.now() / 1000) + 3600).split(".").slice(0, 2).join(".")}.${sig}`;
+  const a = parseAccounts(`a@example.com----pw----${SEED}----${future}`);
+  assert.equal(a.errors.length, 0);
+  assert.equal(a.accounts[0].accessToken, future);
+});
+
 test("caps total account count to avoid unbounded batch", () => {
   const raw = Array.from({ length: 101 }, (_, i) => `a${i}@example.com----p----${SEED}`).join("\n");
   assert.throws(() => parseAccounts(raw), /100/);

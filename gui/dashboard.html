@@ -34,9 +34,9 @@
           <span class="muted tiny">单批最多 100 条 · 可多次追加，累计支持 1000 个多账号轮询</span></div>
 
         <div class="format-guide">
-          <div class="format-title">支持导入的账号格式规范（每行一条，分隔符兼容 <code>----</code> 或 <code>---</code>）：</div>
+          <div class="format-title">支持导入的账号格式规范（每行一条，分隔符兼容 <code>----</code>、<code>---</code> 或 <code>--</code>）：</div>
           <div class="format-list">
-            <div><span class="fmt-tag">格式 1 标准三字段</span><code>邮箱----密码----2FA密钥</code> <span class="muted">（自动后台 HTTP OAuth + TOTP 换取 Token 入池）</span></div>
+            <div><span class="fmt-tag">格式 1 标准三字段</span><code>邮箱----密码----2FA密钥</code> <span class="muted">（自动后台 HTTP OAuth + TOTP 换取 Token 入池；写成 <code>邮箱--密码--2FA</code> 也认）</span></div>
             <div><span class="fmt-tag">格式 2 带邮箱链接</span><code>邮箱----密码----2FA密钥----https://mail.xxx.store/...</code> <span class="muted">（自动识别前三项登录，不主动请求链接）</span></div>
             <div><span class="fmt-tag">格式 3/4 带 Token</span><code>邮箱----密码----2FA密钥----eyJhbGci...</code> <span class="muted">（也兼容 5 段结尾附 refresh_token，优先复用、过期自动重登）</span></div>
           </div>
@@ -57,7 +57,7 @@
           <label class="field-label" for="pasteAccounts">账号列表文本框（可直接粘贴，或选择文件后在此编辑修正）</label>
           <span id="lineCount" class="muted tiny">0 行有效文本</span>
         </div>
-        <textarea id="pasteAccounts" rows="9" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="user1@example.com----password----BASE32TOTPSECRET&#10;user2@example.com----password----BASE32TOTPSECRET----https://mail.xxx.store/...&#10;user3@example.com----password----BASE32TOTPSECRET----eyJhbGci...&#10;user4@example.com----password----BASE32TOTPSECRET----eyJhbGci...----rt_refresh_token"></textarea>
+        <textarea id="pasteAccounts" rows="9" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="user1@example.com----password----BASE32TOTPSECRET&#10;user2@example.com----password----BASE32TOTPSECRET----https://mail.xxx.store/...&#10;user3@example.com----password----BASE32TOTPSECRET----eyJhbGci...&#10;user4@example.com----password----BASE32TOTPSECRET----eyJhbGci...----rt_refresh_token&#10;user5@example.com--password--BASE32TOTPSECRET"></textarea>
         <p class="footnote">提示：可多次批量导入追加到同一个号池。密码、2FA 密钥、JWT 与邮箱链接只保存在本机内存和加密号池中，预览和状态仅显示脱敏邮箱。</p>
 
         <div class="toolbar">
