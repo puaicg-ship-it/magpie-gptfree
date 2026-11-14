@@ -4,11 +4,21 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 const SCRIPT = new URL("../scripts/release.sh", import.meta.url);
+const UPDATE = new URL("../scripts/update-server.sh", import.meta.url);
 const source = () => readFile(SCRIPT, "utf8");
 
 test("发版脚本语法正确", () => {
   // bash -n 只解析不执行
   execFileSync("bash", ["-n", SCRIPT.pathname], { stdio: "pipe" });
+});
+
+test("服务器更新脚本语法正确，且指向部署机上的更新脚本", async () => {
+  execFileSync("bash", ["-n", UPDATE.pathname], { stdio: "pipe" });
+  const text = await readFile(UPDATE, "utf8");
+  assert(text.includes("/root/gptfree-update-plugin.sh"), "必须复用部署机上那份脚本");
+  // 别再退回 magpie plugin update：它对 git 插件不推进 commit，只会假装成功
+  assert(!/magpie plugin update/.test(text.replace(/^#.*$/gm, "")),
+    "不要用 magpie plugin update，它不会推进 git 插件的 commit");
 });
 
 test("发版脚本里没有 \$VAR 紧跟中文的写法", async () => {

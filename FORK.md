@@ -90,6 +90,12 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 
 **升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 部署机执行 `/root/gptfree-update-plugin.sh`。
 
+本地一条命令等价（走 `panel` 跳板，跑完会核对线上版本）：
+
+```bash
+scripts/update-server.sh
+```
+
 > 地址变迁（2026-11）：`puaicg-ship-it/magpie-gptfree` → 账号改名 → `puaicg/magpie-gptfree` → 仓库改名 → **`puaicg/magpie-gptpool`**。
 > 前两个地址都是 301 重定向，老机器上装着的旧 spec 不会立刻坏，但 `bun` 会把解析结果写成旧 URL，
 > 建议顺手把 spec 换成新地址再跑一次更新。
