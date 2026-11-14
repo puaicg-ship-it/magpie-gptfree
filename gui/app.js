@@ -26,6 +26,10 @@
     failed: "授权失败",
   };
   let preview = null, previewSource = "", lastSeq = 0, polling = null, busy = false, poolBusy = false, checkingDraft = false, activeTab = "import";
+  // 批量任务的进度提示：{ kind: "remove" | "check", label, done, total }，null 表示空闲。
+  let poolTask = null;
+  // 一次请求删/查太多号会很慢且没有反馈，按块发，每块回来就刷新一次进度。
+  const BATCH_CHUNK = 20;
   // 表格多选：选中的是界面 id（HMAC 后的），不是邮箱。
   const selectedIds = new Set();
   let lastAccounts = [];
@@ -920,6 +924,36 @@
     return visibleAccounts(lastAccounts).filter((a) => a.id).map((a) => a.id);
   }
 
+  // 批量任务进行中时，两个页面的批量栏都显示「转圈 + 文案 + 已处理/总数」。
+  function setPoolTask(next) {
+    poolTask = next;
+    renderBatchStatus();
+  }
+  function renderBatchStatus() {
+    for (const id of ["poolBatchStatus", "batchStatus"]) {
+      const host = $(id);
+      if (!host) continue;
+      host.replaceChildren();
+      if (!poolTask) continue;
+      const spin = el("span", "spin");
+      spin.setAttribute("aria-hidden", "true");
+      const progress = poolTask.total ? ` ${poolTask.done} / ${poolTask.total}` : "";
+      host.append(spin, el("span", "", poolTask.label + progress));
+    }
+    // 按钮文案跟着任务走：点完立刻变成「删除中…」，而不是只有变灰。
+    const buttons = {
+      poolBatchRemove: ["批量删除", "删除中…", "remove"],
+      poolBatchCheck: ["批量检测额度", "检测中…", "check"],
+      batchRemove: ["批量删除", "删除中…", "remove"],
+      batchCheck: ["批量检测额度", "检测中…", "check"],
+    };
+    for (const [id, [idle, running, kind]] of Object.entries(buttons)) {
+      const btn = $(id);
+      if (!btn) continue;
+      btn.textContent = poolTask && poolTask.kind === kind ? running : idle;
+    }
+  }
+
   function renderBatchBar() {
     const n = selectedIds.size;
     const label = `已选 ${n} 个`;
@@ -948,26 +982,42 @@
       const button = $(id);
       if (button) button.disabled = busy || n === 0;
     }
+    renderBatchStatus();
   }
 
   function statsProxy() {
     return ($("statsProxyInput")?.value || $("poolProxyInput")?.value || $("proxyInput")?.value || "").trim();
   }
 
+  // 按块发请求：一次删/查上百个号会卡很久而且完全没反馈，分块后每块回来就能刷新进度。
+  function chunksOf(ids, size = BATCH_CHUNK) {
+    const out = [];
+    for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+    return out;
+  }
+
   async function batchRefreshQuota() {
     if (poolBusy || !selectedIds.size) return;
+    const ids = [...selectedIds];
+    const total = ids.length;
     setPoolBusyState(true);
+    let done = 0, ok = 0, bad = 0;
     try {
-      const res = await api("accounts/refresh", {
-        ids: [...selectedIds],
-        quotaOnly: true,
-        proxy: statsProxy(),
-      });
-      const ok = (res.results || []).filter((r) => r.quotaOk).length;
-      notice(`已检测 ${res.results?.length || 0} 个账号，其中 ${ok} 个读到了额度`);
+      for (const chunk of chunksOf(ids)) {
+        setPoolTask({ kind: "check", label: "正在检测额度…", done, total });
+        const res = await api("accounts/refresh", { ids: chunk, quotaOnly: true, proxy: statsProxy() });
+        for (const item of res.results || []) {
+          if (item.quotaOk) ok++;
+          else bad++;
+        }
+        done += chunk.length;
+        setPoolTask({ kind: "check", label: "正在检测额度…", done, total });
+      }
+      notice(`已检测 ${done} 个账号，其中 ${ok} 个读到了额度${bad ? `，${bad} 个失败` : ""}`);
     } catch (err) {
-      notice(err.message, true);
+      notice(`检测中断（已完成 ${done} / ${total}）：${err.message}`, true);
     } finally {
+      setPoolTask(null);
       setPoolBusyState(false);
       await loadPool();
     }
@@ -975,7 +1025,8 @@
 
   async function batchRemoveAccounts() {
     if (poolBusy || !selectedIds.size) return;
-    const n = selectedIds.size;
+    const ids = [...selectedIds];
+    const n = ids.length;
     const sure = await confirmAction({
       title: `删除选中的 ${n} 个账号？`,
       message: "凭据会从本机加密库里删掉，无法恢复；对应条目也会从 Magpie 的供应商列表里移除。",
@@ -983,13 +1034,21 @@
     });
     if (!sure) return;
     setPoolBusyState(true);
+    let done = 0;
     try {
-      const res = await api("remove", { ids: [...selectedIds] });
-      selectedIds.clear();
-      notice(`已删除 ${res?.count || n} 个账号`);
+      for (const chunk of chunksOf(ids)) {
+        setPoolTask({ kind: "remove", label: "正在删除账号…", done, total: n });
+        const res = await api("remove", { ids: chunk });
+        done += Number(res?.count || chunk.length);
+        // 删掉一块就从选择集里摘掉，万一中途失败，剩下的还能直接重试。
+        for (const id of chunk) selectedIds.delete(id);
+        setPoolTask({ kind: "remove", label: "正在删除账号…", done, total: n });
+      }
+      notice(`已删除 ${done} 个账号`);
     } catch (err) {
-      notice(err.message, true);
+      notice(`删除中断（已删除 ${done} / ${n}）：${err.message}`, true);
     } finally {
+      setPoolTask(null);
       setPoolBusyState(false);
       await loadPool();
     }

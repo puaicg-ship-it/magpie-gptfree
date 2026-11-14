@@ -233,6 +233,10 @@ tr.row-selected { background: var(--accent-weak) }
 .pool-pick input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent) }
 .account-row.row-selected { background: var(--accent-weak) }
 .batch-bar #poolBatchCount { font-weight: 700; color: var(--text) }
+.batch-status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted) }
+.batch-status:empty { display: none }
+.batch-status .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: batch-spin .8s linear infinite; flex: none }
+@keyframes batch-spin { to { transform: rotate(360deg) } }
 
 /* 表格可排序表头 */
 .sort-th { border: 0; background: transparent; color: inherit; font: inherit; font-weight: 620; padding: 0; cursor: pointer; white-space: nowrap }
@@ -269,5 +273,6 @@ footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 1
   .stats-grid { grid-template-columns: 1fr }
 }
 @media (prefers-reduced-motion: reduce) {
+  .batch-status .spin { animation: none; border-top-color: var(--accent) }
   .dropzone, #progressFill { transition: none }
 }

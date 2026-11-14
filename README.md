@@ -30,8 +30,9 @@
 > 不装环境、不跑浏览器、不用改配置。填个仓库地址，把账号文本粘进去，剩下的插件自己干。
 
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
-[![license](https://img.shields.io/badge/license-MIT-16845c)](./package.json)
-[![version](https://img.shields.io/badge/version-0.8.2-a36207)](./package.json)
+[![license](https://img.shields.io/badge/license-MIT-16845c)](./LICENSE)
+[![changelog](https://img.shields.io/badge/changelog-%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95-6f7d91)](./CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.8.3-a36207)](./package.json)
 
 ---
 

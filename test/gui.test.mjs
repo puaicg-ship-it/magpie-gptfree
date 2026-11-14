@@ -523,12 +523,22 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     assert(!/\balert\s*\(/.test(app), "沙箱 iframe 里 alert 不生效");
     assert(app.includes("function confirmAction"));
     assert(app.includes("confirm-layer"));
+    // 批量操作要有进度反馈：按钮变文案 + 转圈 + 已处理/总数
+    assert(h.html.includes('id="poolBatchStatus"'));
+    assert(h.html.includes('id="batchStatus"'));
+    assert(app.includes("function setPoolTask"));
+    assert(app.includes("function renderBatchStatus"));
+    assert(app.includes("function chunksOf"));
+    assert(app.includes("正在删除账号…"));
+    assert(app.includes("BATCH_CHUNK"));
     // 失败原因不能只显示 worker_timeout 这种代号，要有中文名 + 悬停解释。
     assert(app.includes("生图超时（本地掐断）"));
     assert(app.includes("function errorHint"));
     assert(app.includes("ERROR_HINTS"));
     const css = await (await fetch(h.base + "assets/style.css")).text();
     assert(css.includes(".confirm-layer"));
+    assert(css.includes(".batch-status"));
+    assert(css.includes("@keyframes batch-spin"));
     assert(css.includes(".confirm-box"));
     assert(!app.includes("innerHTML"));
     assert(!app.includes("localStorage"));

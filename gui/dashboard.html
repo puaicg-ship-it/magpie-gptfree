@@ -145,6 +145,7 @@
           <button id="poolBatchCheck" type="button" class="btn secondary small">批量检测额度</button>
           <button id="poolBatchRemove" type="button" class="btn danger small">批量删除</button>
           <button id="poolBatchClear" type="button" class="btn secondary small">取消选择</button>
+          <span id="poolBatchStatus" class="batch-status" role="status" aria-live="polite"></span>
           <label class="inline-check"><input type="checkbox" id="poolPickAll"> <span>全选当前列表</span></label>
         </div>
         <div id="poolList" class="pool-list"></div>
@@ -234,6 +235,7 @@
           <button id="batchCheck" type="button" class="btn secondary small">批量检测额度</button>
           <button id="batchRemove" type="button" class="btn danger small">批量删除</button>
           <button id="batchClear" type="button" class="btn secondary small">取消选择</button>
+          <span id="batchStatus" class="batch-status" role="status" aria-live="polite"></span>
           <span class="muted tiny">勾选表头复选框可全选</span>
         </div>
         <div class="table-wrap stats-table-wrap">
@@ -256,7 +258,7 @@
       </section>
       <div id="notice" class="notice hidden" role="status"></div>
     </main>
-    <footer>GPTFree号池 · 所有凭证仅在本机处理。请遵守上游使用规则与账号授权范围。</footer>
+    <footer>GPTFree号池 v__GPTFREE_VERSION__ · 所有凭证仅在本机处理。请遵守上游使用规则与账号授权范围。</footer>
   </div>
 </body>
 </html>
