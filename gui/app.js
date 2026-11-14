@@ -377,6 +377,15 @@
         title: `${formatTime(account.limitedAt, "限流开始于 ")}${reset}`,
       };
     }
+    // 记这笔账之前就已经在限流的号：开始时间没有，别硬编一个。
+    // 能说的是什么时候能恢复，这对决定「留着还是删掉」更有用。
+    if (account?.quotaStatus === "limited") {
+      const reset = formatTime(account?.quotaResetAt, "预计 ");
+      return {
+        text: reset ? `限流中 · ${reset}` : "限流中",
+        title: "这一轮限流开始于记录功能上线之前，没有开始时间；下次进入限流会正常记录起止",
+      };
+    }
     if (account?.recoveredAt && account?.lastLimitedAt) {
       return {
         text: `已恢复 · 上轮限流 ${span || "—"}`,
