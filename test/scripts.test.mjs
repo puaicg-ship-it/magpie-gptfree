@@ -38,9 +38,31 @@ test("发版脚本覆盖发版必需的动作", async () => {
     "--save-token",                        // 钥匙串
     "gptfree-update-plugin.sh",            // 部署机
     "LOCAL_TOKEN_FILE",                    // 允许"就放在脚本旁边"的 token 文件
+    "create_release",                      // Release 步骤抽成函数，才能单独补建
+    "--only-release",                      // 补建已有 tag 的 Release
   ]) {
     assert(text.includes(needle), "缺少：" + needle);
   }
+});
+
+test("--only-release 只补 Release，不动版本", async () => {
+  const text = await source();
+  const start = text.indexOf('if [ "$ONLY_RELEASE" = 1 ]');
+  assert(start > 0, "缺少 --only-release 分支");
+  // 分支体到下一个空行段落为止
+  const body = text.slice(start, text.indexOf("\nfi\n", start));
+  assert(body.includes("create_release"), "补建分支必须复用 create_release");
+  assert(!body.includes("git commit"), "补建分支不能提交");
+  assert(!body.includes("git push"), "补建分支不能推送");
+  // 版本号检查要在补建分支之前，否则 --only-release 拿不到版本
+  assert(text.indexOf("缺少版本号") < start, "版本号检查应在补建分支之前");
+});
+
+test("Release 正文取自 CHANGELOG 对应版本", async () => {
+  const text = await source();
+  assert(text.includes("## [${v}]"), "应按版本号定位 CHANGELOG 小节");
+  // 422 说明 Release 已存在，重复执行不该报失败
+  assert(text.includes("422"), "重复建 Release 要当成功处理");
 });
 
 test(".gitignore 兜住了 token 文件", async () => {
