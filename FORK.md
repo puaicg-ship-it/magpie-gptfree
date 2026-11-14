@@ -15,7 +15,7 @@
 | `lib/chatgpt-web-image.mjs` | 单次 35s / 整单 55s 硬预算（`AbortController` + `Promise.race`，重新登录也算在预算里）；额度耗尽的 400 换号而不是整个请求失败；解析"上限将在 21小时 后重置"得到 `retryAfter`。 |
 | `lib/chatgpt-web-text.mjs` | 单次尝试压到 60s 且不超过剩余预算（worker 默认 180s 比整单 120s 还长）；文本选号排除「重新登录都过不去」的号，但**不**套用图片的熔断/额度状态，并用自己的轮转账本，不干扰图片按额度加权。 |
 | `gui/app.js` | 额度统计页的失效徽章，区分三种失效原因并给出对应的复活提示。 |
-| `test/*` | 19 个新用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、预算超时、额度 400 换号。 |
+| `test/*` | 111 个用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、预算超时、额度 400 换号、额度复检守卫、文本链路、按天统计、限流生命周期、批量接口。 |
 
 环境变量（都有默认值，一般不用设）：
 
@@ -45,14 +45,41 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 
 合完重点看三个文件有没有被上游改过：`codex-pool.mjs`、`pool-stats.mjs`、`chatgpt-web-image.mjs`。上游动了这三处，就要人工过一遍我们的改动，别机械解冲突。
 
+## 怎么装、怎么升级
+
+**Magpie 里这个插件的安装源就是这个仓**，spec 写在 `plugins.json`：
+
+```json
+{ "spec": "https://github.com/puaicg-ship-it/magpie-gptfree" }
+```
+
+没有 `#<commit>` 就是跟默认分支（`patch/chat-image-bridge`）走。这意味着：
+
+- 上游推新提交**不会再影响我们** —— Magpie 比的是这个仓的 commit，不是 `yang0/magpie-gptfree`。
+- 我们自己推了新提交，面板上会出现「有更新」，点一下或跑 `magpie plugin update` 就升到我们的新代码，**不会把改动覆盖掉**（改动本来就在仓里）。
+- 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg-ship-it/magpie-gptfree#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
+
+**升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 面板点更新（或 `magpie plugin update`）→ 重启 Magpie。
+
+## 账号数据在哪（重装插件不会动）
+
+| 东西 | 位置 |
+| --- | --- |
+| 账号凭据（加密） | `~/.magpie-gptfree/pool.enc.json` + `master.key`（容器内 `/config/home/.magpie-gptfree/`） |
+| 健康账本 | 同目录 `pool-stats.json` |
+| 插件代码 | `plugins/node_modules/magpie-gptfree/` |
+
+两个目录完全独立。重装/升级插件只替换后者，`master.key` 不变，加密的账号一定能解开。唯一会丢数据的情况是删掉整个 `~/.magpie-gptfree`。
+
 ## 服务器上怎么用
 
 `example.com` 的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptfree`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptfree`）。
 
-- `/root/fix-gptfree-chat-image.sh` —— 从 `/root/gptfree-patch/` 覆盖五个文件并重启 Magpie。**这是过渡手段**，等这里安装源切换完成就可以退役。
-- `/root/verify-gptfree-patch.sh` —— 校验补丁在位（退出码 0 表示正常）。
-- 备份：`/root/gptfree-backup-*.tgz`。
+- `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
+- `/root/fix-gptfree-chat-image.sh` —— 从 `/root/gptfree-patch/` 覆盖九个文件并重启。**现在只是兜底**：万一哪天有人把 spec 改回上游，或者 Magpie 重建 node_modules 时拉错了源，用它把我们的代码按回去。
+- `/root/check-gptfree-health.sh` —— 池子容量健康检查，退出码 0/1，可接 cron 告警。
+- 备份：`/root/gptfree-backup/`（`vault-*.tar.gz` 是凭据，`plugin-dir-*.tar.gz` 是插件目录，`plugins.json.*` 是配置）。
 
 ## 许可
 
-上游 `package.json` 写的是 MIT，但仓库里没有 LICENSE 文件。本仓为私有仓，仅内部使用。
+上游 `package.json` 写的是 MIT，但仓库里没有 LICENSE 文件。本仓为公开仓，沿用上游 MIT 条款。
