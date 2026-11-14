@@ -531,3 +531,47 @@ test("GUI keeps a page usable across a plugin-host restart (persisted capability
   }
 });
 
+
+// 健康检查是给 cron / 面板用的：不能要求 GUI 会话，否则监控脚本没法调。
+test("GET /api/health reports pool capacity without a GUI session", async () => {
+  const store = createInMemoryStatsStore();
+  const rows = ["a@example.com", "b@example.com", "c@example.com"].map((email) => ({
+    email, password: "p", totp: seed, accessToken: future(),
+  }));
+  for (const row of rows) {
+    await recordQuotaCheck({ email: row.email, quota: 20 }, { statsStore: store });
+  }
+
+  const h = await harness({ poolRead: async () => rows, statsStore: store });
+  try {
+    const res = await fetch(h.base + "api/health");
+    const body = await res.json();
+    assert.equal(res.status, 200, "a pool above the thresholds is healthy");
+    assert.equal(body.ok, true);
+    assert.equal(body.usable, 3);
+    assert.equal(body.totalQuota, 60);
+    assert.equal(body.dead, 0);
+    assert.equal(body.total, 3);
+    assert.equal(body.thresholds.minUsable, 3);
+    assert.ok(!JSON.stringify(body).includes("@"), "health output carries no emails");
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /api/health answers 503 when the pool drops below the usable threshold", async () => {
+  const store = createInMemoryStatsStore();
+  const rows = [{ email: "only@example.com", password: "p", totp: seed, accessToken: future() }];
+  await recordQuotaCheck({ email: "only@example.com", quota: 20 }, { statsStore: store });
+
+  const h = await harness({ poolRead: async () => rows, statsStore: store });
+  try {
+    const res = await fetch(h.base + "api/health");
+    const body = await res.json();
+    assert.equal(res.status, 503, "a single usable account is not enough");
+    assert.equal(body.ok, false);
+    assert.equal(body.usable, 1);
+  } finally {
+    await h.close();
+  }
+});

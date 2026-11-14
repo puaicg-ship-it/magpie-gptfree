@@ -215,3 +215,32 @@ test("a healthy quota check revives an account killed by failed re-auth", async 
   assert.equal(store.state.accounts[accountSlotTag(email)].authFails, 0);
   assert.equal(store.state.accounts[accountSlotTag(email)].consecutiveFails, 0);
 });
+
+// "失败了 84 次" 这种记录没法排查，得知道是 MFA 被拦还是超时。原因码要落盘。
+test("the last failure reason is recorded per account and cleared on success", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "why@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordImageCall({ email, success: false, error: "mfa_verify_failed_403" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].lastErrorCode, "mfa_verify_failed_403");
+  assert.ok(store.state.accounts[tag].lastErrorAt, "failure timestamp is kept");
+
+  // 请求本身的错也记原因码，但不影响账号健康。
+  await recordImageCall({ email, success: false, error: "content_policy_violation", accountFault: false }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].lastErrorCode, "content_policy_violation");
+  assert.equal(store.state.accounts[tag].consecutiveFails, 1, "request faults do not add to the streak");
+
+  await recordImageCall({ email, success: true, count: 1 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].lastErrorCode, null);
+  assert.equal(store.state.accounts[tag].lastErrorAt, null);
+});
+
+test("an error code that is not a plain identifier is dropped instead of stored", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "dirty@example.com";
+  await recordImageCall({
+    email, success: false, error: "upstream said: <html>Bearer sk-abc</html>",
+  }, { statsStore: store });
+  assert.equal(store.state.accounts[accountSlotTag(email)].lastErrorCode, null);
+});

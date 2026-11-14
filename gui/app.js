@@ -331,6 +331,25 @@
     const d = new Date(iso);
     return Number.isNaN(d.getTime()) ? "" : prefix + d.toLocaleString();
   }
+  // 失败原因码翻译成人话。认不出来的码原样显示，至少比"失败了 84 次"有用。
+  const ERROR_LABELS = {
+    mfa_verify_failed_403: "MFA 验证被拦",
+    unauthorized: "登录失效",
+    request_timeout: "请求超时",
+    timeout: "请求超时",
+    quota_exhausted: "额度用尽",
+    rate_limited: "被上游限流",
+    content_policy_violation: "提示词被拒",
+    invalid_image: "图片不合规",
+    upstream_bad_request: "上游拒绝请求",
+    upstream_error: "上游报错",
+    pool_empty: "池里没有可用号",
+    reauth_failed: "重新登录失败",
+  };
+  function errorLabel(code) {
+    if (!code) return "";
+    return ERROR_LABELS[code] || code;
+  }
   function quotaBadgeInfo(account) {
     const status = account.quotaStatus || (typeof account.imageQuota === "number"
       ? (account.imageQuota === 0 ? "limited" : "available")
@@ -587,6 +606,12 @@
 
       const statusTd = el("td");
       statusTd.append(el("span", "pill " + q.cls, q.statusLabel));
+      if (account.lastErrorCode && (account.failCalls || 0) > 0) {
+        const errSpan = el("span", "muted", " " + errorLabel(account.lastErrorCode));
+        errSpan.title = account.lastErrorCode +
+          (account.lastErrorAt ? " · " + formatTime(account.lastErrorAt, "发生在 ") : "");
+        statusTd.append(errSpan);
+      }
       tr.append(statusTd);
 
       const quotaTd = el("td", "quota-num", q.quotaCell);
@@ -594,6 +619,10 @@
       tr.append(quotaTd);
 
       const callsTd = el("td", "", (account.successCalls || 0) + " / " + (account.failCalls || 0));
+      if (account.lastErrorCode) {
+        callsTd.title = "上次失败：" + errorLabel(account.lastErrorCode) +
+          "（" + account.lastErrorCode + "）";
+      }
       tr.append(callsTd);
 
       const checkedText = account.quotaCheckedAt
