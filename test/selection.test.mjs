@@ -327,3 +327,38 @@ test("the background re-check never re-authenticates, and a recovered quota puts
   const order = selectPoolOrder({ accounts: [live], stats: store.state });
   assert.equal(order[0].email, email, "额度恢复后重新回到可用队列");
 });
+
+// 重置时间过后查了一次还是 401（token 被上游废掉），就不能每十分钟再问一遍 ——
+// 那种号要人工重新导入，反复探测只是白起 Python 进程。
+test("an account already checked after its reset time and still failing is left alone", () => {
+  const live = { email: "stuck@example.com", accessToken: liveToken() };
+  const resetAt = new Date(Date.now() - 6 * 3600_000).toISOString();
+  const checkedAfter = new Date(Date.now() - 5 * 3600_000).toISOString();
+
+  const failedAfterReset = statsWith({
+    [live.email]: {
+      imageQuota: 0, restoreAt: resetAt, quotaCheckedAt: checkedAfter,
+      quotaError: "网页鉴权 401（Token 无 chatgpt.com 网页权限或已失效）",
+    },
+  });
+  assert.equal(
+    accountsNeedingQuotaRefresh([live], failedAfterReset, { probedAt: new Map() }).length, 0,
+    "already asked once since the reset; a human has to re-import the credentials",
+  );
+
+  // 还没查过（quotaError 为空）→ 正常去问
+  const neverChecked = statsWith({
+    [live.email]: { imageQuota: 0, restoreAt: resetAt, quotaCheckedAt: null },
+  });
+  assert.equal(accountsNeedingQuotaRefresh([live], neverChecked, { probedAt: new Map() }).length, 1);
+
+  // 查是查过，但在重置时间之前 → 说明那是上一轮的旧结果，现在该重新问了
+  const checkedBeforeReset = statsWith({
+    [live.email]: {
+      imageQuota: 0, restoreAt: resetAt,
+      quotaCheckedAt: new Date(Date.now() - 30 * 3600_000).toISOString(),
+      quotaError: "查询生图额度超时",
+    },
+  });
+  assert.equal(accountsNeedingQuotaRefresh([live], checkedBeforeReset, { probedAt: new Map() }).length, 1);
+});
