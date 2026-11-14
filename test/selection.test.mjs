@@ -1,6 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { selectPoolOrder } from "../lib/codex-pool.mjs";
+import {
+  accountsNeedingQuotaRefresh,
+  refreshExpiredQuotas,
+  selectPoolOrder,
+} from "../lib/codex-pool.mjs";
 import {
   AUTH_FAIL_LIMIT,
   accountDeadReason,
@@ -15,6 +19,13 @@ import {
 import { accountSlotTag } from "../lib/pool-connection.mjs";
 
 const account = (email) => ({ email, password: "p", totp: "seed", accessToken: "t" });
+
+// 一个"还没过期"的 JWT，用来区分"能直接问额度"和"得先重新登录"。
+const liveToken = () => [
+  Buffer.from('{"alg":"RS256"}').toString("base64url"),
+  Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url"),
+  "sig",
+].join(".");
 
 function statsWith(entries) {
   const accounts = {};
@@ -243,4 +254,76 @@ test("an error code that is not a plain identifier is dropped instead of stored"
     email, success: false, error: "upstream said: <html>Bearer sk-abc</html>",
   }, { statsStore: store });
   assert.equal(store.state.accounts[accountSlotTag(email)].lastErrorCode, null);
+});
+
+// 额度只会在"成功 -1"时减少，打到 0 之后就永远挂着 0。上游 24 小时重置了也没人
+// 知道，得人工点「检测额度」——号池会越用越少。所以要在重置时间过后自动复检。
+test("only a zero-quota account whose reset time has passed is picked for a quiet re-check", () => {
+  const live = { email: "reset@example.com", accessToken: liveToken() };
+  const past = new Date(Date.now() - 3600_000).toISOString();
+  const future = new Date(Date.now() + 3600_000).toISOString();
+
+  const expired = statsWith({ [live.email]: { imageQuota: 0, restoreAt: past } });
+  assert.equal(accountsNeedingQuotaRefresh([live], expired, { probedAt: new Map() }).length, 1);
+
+  const notYet = statsWith({ [live.email]: { imageQuota: 0, restoreAt: future } });
+  assert.equal(
+    accountsNeedingQuotaRefresh([live], notYet, { probedAt: new Map() }).length, 0,
+    "the reset time has not arrived yet",
+  );
+
+  const hasQuota = statsWith({ [live.email]: { imageQuota: 5, restoreAt: past } });
+  assert.equal(
+    accountsNeedingQuotaRefresh([live], hasQuota, { probedAt: new Map() }).length, 0,
+    "an account with quota left needs no probe",
+  );
+
+  // token 已经过期：问额度就得重新登录，那不叫"顺手"，交给人工。
+  const stale = { email: "needslogin@example.com", accessToken: "not-a-jwt" };
+  const staleStats = statsWith({ [stale.email]: { imageQuota: 0, restoreAt: past } });
+  assert.equal(accountsNeedingQuotaRefresh([stale], staleStats, { probedAt: new Map() }).length, 0);
+});
+
+test("a dead account is never re-checked automatically, and the probe gap is honoured", () => {
+  const live = { email: "dead@example.com", accessToken: liveToken() };
+  const past = new Date(Date.now() - 3600_000).toISOString();
+  const stats = statsWith({ [live.email]: { imageQuota: 0, restoreAt: past, successCalls: 0, failCalls: 90 } });
+  assert.equal(accountDeadReason(live.email, stats), "never");
+  assert.equal(accountsNeedingQuotaRefresh([live], stats, { probedAt: new Map() }).length, 0);
+
+  const alive = { email: "gap@example.com", accessToken: liveToken() };
+  const gapStats = statsWith({ [alive.email]: { imageQuota: 0, restoreAt: past } });
+  const recent = new Map([[alive.email, Date.now() - 60_000]]);
+  assert.equal(accountsNeedingQuotaRefresh([alive], gapStats, { probedAt: recent }).length, 0);
+  const old = new Map([[alive.email, Date.now() - 11 * 60_000]]);
+  assert.equal(accountsNeedingQuotaRefresh([alive], gapStats, { probedAt: old }).length, 1);
+});
+
+test("the background re-check never re-authenticates, and a recovered quota puts the account back", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "recovered@example.com";
+  const live = { email, accessToken: liveToken() };
+  const past = new Date(Date.now() - 3600_000).toISOString();
+  await recordQuotaCheck({ email, quota: 0, restoreAt: past }, { statsStore: store });
+  assert.equal(store.state.accounts[accountSlotTag(email)].imageQuota, 0);
+
+  let seen = null;
+  const results = await refreshExpiredQuotas([live], store.state, {
+    statsStore: store,
+    probedAt: new Map(),
+    probe: async (acct, opts) => {
+      seen = opts;
+      await recordQuotaCheck({ email: acct.email, quota: 25 }, { statsStore: store });
+      return { ok: true, imageQuota: 25 };
+    },
+  });
+
+  assert.equal(seen.reauthenticate, null, "背景复检绝不触发重新登录（MFA 风险）");
+  assert.equal(seen.silent, true, "失败不写 quotaError");
+  assert.equal(results.length, 1);
+  assert.equal(store.state.accounts[accountSlotTag(email)].imageQuota, 25);
+  assert.equal(store.state.accounts[accountSlotTag(email)].limitedUntil, null);
+
+  const order = selectPoolOrder({ accounts: [live], stats: store.state });
+  assert.equal(order[0].email, email, "额度恢复后重新回到可用队列");
 });
