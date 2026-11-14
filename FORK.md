@@ -65,14 +65,38 @@ node --test --test-concurrency=1
 
 ## 怎么跟上游
 
+上游是 `yang0/magpie-gptfree`（remote 名 `upstream`）。**上游修 bug 时，很可能修的是我们也有的问题**，
+所以要看，但不能直接合 —— 我们重写了选号、熔断、判死、GUI 这几块，机械解冲突等于把我们的改动抹掉。
+
+一条命令看「上游动了什么、会不会撞上我们」：
+
 ```bash
-git fetch upstream
-git log --oneline upstream/main ^main          # 上游新提交
-git diff upstream/main..HEAD -- lib/           # 我们的改动有没有跟上游撞
-git merge upstream/main                        # 在 patch/chat-image-bridge 上合
+scripts/upstream-status.sh
 ```
 
-合完重点看三个文件有没有被上游改过：`codex-pool.mjs`、`pool-stats.mjs`、`chatgpt-web-image.mjs`。上游动了这三处，就要人工过一遍我们的改动，别机械解冲突。
+输出会按风险分级，不是只报「落后几个提交」：
+
+- **高**：上游动的文件我们也在改 → 必须人看，会列出具体文件名
+- **中（文档/测试）**：只跟我们的 README / test 撞 → 照合即可
+- **中（代码）**：动了 `lib/` 但没碰我们的改动 → 正常合
+- **低**：只动 CI / 文档
+
+退出码：`0` 已同步，`1` 上游有新提交。`--quiet` 只在落后时输出，给定时任务用。
+
+确认要合之后：
+
+```bash
+git log -p upstream/main ^HEAD -- lib/codex-pool.mjs   # 先看上游到底改了什么
+git diff upstream/main..HEAD -- lib/                    # 再看我们改了什么
+git merge upstream/main
+npm test
+```
+
+合完重点看三个文件有没有被上游改过：`codex-pool.mjs`、`pool-stats.mjs`、`chatgpt-web-image.mjs`。
+上游动了这三处，就要按**我们的语义**重新落一遍，别机械解冲突。
+
+> 分叉点现在是 `5ab9b99`（我们领先 42 个提交）。`upstream-status.sh` 用 `merge-base` 算分叉点，
+> 所以合过一次之后不用改任何配置，它自己知道从哪儿开始算。
 
 ## 怎么装、怎么升级
 

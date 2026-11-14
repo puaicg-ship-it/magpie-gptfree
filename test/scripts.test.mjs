@@ -5,11 +5,24 @@ import { readFile } from "node:fs/promises";
 
 const SCRIPT = new URL("../scripts/release.sh", import.meta.url);
 const UPDATE = new URL("../scripts/update-server.sh", import.meta.url);
+const UPSTREAM = new URL("../scripts/upstream-status.sh", import.meta.url);
 const source = () => readFile(SCRIPT, "utf8");
 
-test("发版脚本语法正确", () => {
+test("所有脚本语法正确", () => {
   // bash -n 只解析不执行
-  execFileSync("bash", ["-n", SCRIPT.pathname], { stdio: "pipe" });
+  for (const script of [SCRIPT, UPDATE, UPSTREAM]) {
+    execFileSync("bash", ["-n", script.pathname], { stdio: "pipe" });
+  }
+});
+
+test("上游追踪脚本按「撞不撞我们的改动」分级", async () => {
+  const text = await readFile(UPSTREAM, "utf8");
+  // 只报"落后几个提交"没用，得知道会撞哪儿
+  assert(text.includes("merge-base"), "要用分叉点算差异，不能拿 upstream/main 直接比");
+  assert(text.includes("git diff --name-only"), "要算出我们改过的文件集合");
+  assert(text.includes("is_code"), "撞代码和撞文档要分开，否则上游改个 README 也报高风险");
+  assert(text.includes("--quiet"), "定时任务需要只在落后时输出");
+  assert(text.includes("exit 1"), "落后时退出码要非 0，定时任务才能判断");
 });
 
 test("服务器更新脚本语法正确，且指向部署机上的更新脚本", async () => {
@@ -21,16 +34,18 @@ test("服务器更新脚本语法正确，且指向部署机上的更新脚本",
     "不要用 magpie plugin update，它不会推进 git 插件的 commit");
 });
 
-test("发版脚本里没有 \$VAR 紧跟中文的写法", async () => {
+test("脚本里没有 \$VAR 紧跟中文的写法", async () => {
   // bash 对多字节字符的变量名边界判断不可靠：`$VERSION：xxx` 会被当成变量
   // `VERSION：`，set -u 下直接 unbound variable 中止。踩过两次（tag 消息、
   // 钥匙串提示），这里加个回归守卫，新写文案时立刻能发现。
-  const text = await source();
   const offenders = [];
-  for (const [index, line] of text.split("\n").entries()) {
-    if (line.trimStart().startsWith("#")) continue;
-    for (const match of line.matchAll(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/g)) {
-      offenders.push(`第 ${index + 1} 行: ${match[0]}`);
+  for (const script of [SCRIPT, UPDATE, UPSTREAM]) {
+    const text = await readFile(script, "utf8");
+    for (const [index, line] of text.split("\n").entries()) {
+      if (line.trimStart().startsWith("#")) continue;
+      for (const match of line.matchAll(/\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]/g)) {
+        offenders.push(`${script.pathname.split("/").pop()} 第 ${index + 1} 行: ${match[0]}`);
+      }
     }
   }
   assert.deepEqual(offenders, [], "请写成 ${VAR} 再跟中文：" + offenders.join("；"));
