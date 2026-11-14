@@ -99,6 +99,26 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 > 实际没动）。`bun update <包名>` 才会重新解析。`gptfree-update-plugin.sh` 做的就是
 > `bun update magpie-gptpool` + 重启 + 校验，一条命令搞定。
 
+## 怎么发版
+
+```bash
+cd ~/Documents/magpie-gptpool
+./scripts/release.sh 0.8.5 "改动一" "改动二"          # 发版
+./scripts/release.sh 0.8.5 "改动一" --deploy          # 发完顺手部署到 example.com
+./scripts/release.sh 0.8.5 "改动一" --release         # 顺便建 GitHub Release
+./scripts/release.sh 0.8.5 "改动一" --dry-run         # 只看要做什么
+```
+
+脚本会：校验分支/工作区 → `npm run check` + 全部测试 → 升 `package.json` → 改 README 徽章 →
+在 CHANGELOG 顶部插一节 → `commit` → `git tag -a vX.Y.Z` → `push --follow-tags`。
+测试不过就中止，不写任何文件。
+
+**GitHub token（建 Release 才需要）**：别写进仓库里的任何文件 —— 发版脚本自己会 `git add -A`
+并提交，token 会被推到公开仓库，GitHub 的 secret scanning 还会直接吊销它。正确做法是
+`./scripts/release.sh --save-token`，交互输入（不回显、不进 shell 历史），macOS 存钥匙串，
+其他平台写 `~/.magpie-gptpool-release-token`（0600）。取用优先级：
+`GITHUB_TOKEN` 环境变量 > `gh auth token` > 钥匙串 > 上面那个文件。
+
 ## 账号数据在哪（重装插件不会动）
 
 | 东西 | 位置 |

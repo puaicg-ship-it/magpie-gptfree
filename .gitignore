@@ -10,6 +10,10 @@ master.key
 .env.*
 *.secret
 *.secrets
+# 发版用的 GitHub token：只放本机，永远不要提交
+.magpie-gptpool-release-token
+*.release-token
+*.token
 
 # Runtime and tests
 node_modules/
