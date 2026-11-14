@@ -2,12 +2,14 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { selectPoolOrder } from "../lib/codex-pool.mjs";
 import {
+  AUTH_FAIL_LIMIT,
   accountDeadReason,
   createInMemoryStatsStore,
   failCooldownMs,
   isAccountCoolingDown,
   isAccountDead,
   recordImageCall,
+  recordQuotaCheck,
   summarizePoolStats,
 } from "../lib/pool-stats.mjs";
 import { accountSlotTag } from "../lib/pool-connection.mjs";
@@ -174,4 +176,42 @@ test("summarizePoolStats reports dead accounts with a reason", () => {
   assert.equal(snap.accounts[0].deadReason, "stale");
   assert.equal(snap.quotaStats.dead, 1);
   assert.equal(snap.quotaStats.active, 0);
+});
+
+// 线上真实现象：额度快照上还挂着 25，但成功次数是 0、失败几十次。这种号只靠冷却
+// 会一小时一次地回到队列里，每次拖到超时，必须直接判死。
+test("an account that never succeeded but failed many times is dead even with quota left", () => {
+  const broken = account("broken@example.com");
+  const working = account("working@example.com");
+  const stats = statsWith({
+    [broken.email]: { imageQuota: 25, successCalls: 0, failCalls: 52 },
+    [working.email]: { imageQuota: 1, successCalls: 2, failCalls: 0 },
+  });
+
+  assert.equal(accountDeadReason(broken.email, stats), "never");
+  assert.equal(isAccountDead(working.email, stats), false);
+
+  const order = selectPoolOrder({ accounts: [broken, working], stats });
+  assert.equal(order[0].email, working.email);
+  assert.equal(order[order.length - 1].email, broken.email);
+});
+
+test("a single success is enough to keep an account out of the never-worked rule", () => {
+  const once = account("once@example.com");
+  const stats = statsWith({ [once.email]: { imageQuota: 5, successCalls: 1, failCalls: 40 } });
+  assert.equal(accountDeadReason(once.email, stats), "");
+});
+
+test("a healthy quota check revives an account killed by failed re-auth", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "revive@example.com";
+  for (let i = 0; i < AUTH_FAIL_LIMIT; i++) {
+    await recordImageCall({ email, success: false, error: "unauthorized", authFault: true }, { statsStore: store });
+  }
+  assert.equal(accountDeadReason(email, store.state), "auth");
+
+  await recordQuotaCheck({ email, quota: 25, hasImageLimit: true }, { statsStore: store });
+  assert.equal(isAccountDead(email, store.state), false);
+  assert.equal(store.state.accounts[accountSlotTag(email)].authFails, 0);
+  assert.equal(store.state.accounts[accountSlotTag(email)].consecutiveFails, 0);
 });
