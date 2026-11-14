@@ -364,6 +364,18 @@
         title: "Token 已过期，需重新授权后再检测生图额度",
       };
     }
+    if (status === "dead") {
+      const why = account.deadReason === "auth" ? "重新登录连续失败（多半是 MFA 被拦）"
+        : account.deadReason === "stale" ? "连续 3 天没有成功过一次"
+        : "已被标记为失效";
+      return {
+        cls: "bad",
+        pillText: "已失效 · 不再派活",
+        statusLabel: "已失效",
+        quotaCell: "失效",
+        title: why + " · 人工「检测额度」或重新导入凭据可复活",
+      };
+    }
     if (status === "unavailable") {
       return {
         cls: "bad",

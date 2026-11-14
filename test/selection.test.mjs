@@ -2,10 +2,13 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { selectPoolOrder } from "../lib/codex-pool.mjs";
 import {
+  accountDeadReason,
   createInMemoryStatsStore,
   failCooldownMs,
   isAccountCoolingDown,
+  isAccountDead,
   recordImageCall,
+  summarizePoolStats,
 } from "../lib/pool-stats.mjs";
 import { accountSlotTag } from "../lib/pool-connection.mjs";
 
@@ -111,4 +114,64 @@ test("cooldown backs off with the failure streak and is capped at an hour", () =
   assert.equal(failCooldownMs(4), 20 * 60 * 1000);
   assert.equal(failCooldownMs(5), 40 * 60 * 1000);
   assert.equal(failCooldownMs(9), 60 * 60 * 1000);
+});
+
+test("a request-level failure (content policy) does not damage account health", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "policy@example.com";
+  for (let i = 0; i < 5; i++) {
+    await recordImageCall(
+      { email, success: false, error: "content_policy_violation", accountFault: false },
+      { statsStore: store },
+    );
+  }
+  const entry = store.state.accounts[accountSlotTag(email)];
+  assert.equal(entry.consecutiveFails, 0);
+  assert.equal(entry.failSince, null);
+  assert.equal(entry.failCalls, 5, "total failures are still counted");
+  assert.equal(isAccountCoolingDown(email, store.state), false);
+});
+
+test("two failed re-auths mark the account dead until a success revives it", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "mfa@example.com";
+  await recordImageCall({ email, success: false, error: "unauthorized", authFault: true }, { statsStore: store });
+  assert.equal(isAccountDead(email, store.state), false, "one auth failure is not enough");
+  await recordImageCall({ email, success: false, error: "unauthorized", authFault: true }, { statsStore: store });
+  assert.equal(isAccountDead(email, store.state), true);
+  assert.equal(accountDeadReason(email, store.state), "auth");
+
+  await recordImageCall({ email, success: true, count: 1 }, { statsStore: store });
+  assert.equal(isAccountDead(email, store.state), false);
+  assert.equal(store.state.accounts[accountSlotTag(email)].authFails, 0);
+});
+
+test("an account that has not succeeded for three days is dead, and dead accounts sort last", () => {
+  const stale = account("stale@example.com");
+  const fresh = account("fresh@example.com");
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString();
+  const stats = statsWith({
+    [stale.email]: { imageQuota: 50, successCalls: 3, failCalls: 9, failSince: fourDaysAgo },
+    [fresh.email]: { imageQuota: 1, successCalls: 1, failCalls: 0 },
+  });
+
+  assert.equal(accountDeadReason(stale.email, stats), "stale");
+  assert.equal(isAccountDead(fresh.email, stats), false);
+
+  const order = selectPoolOrder({ accounts: [stale, fresh], stats });
+  assert.equal(order[0].email, fresh.email);
+  assert.equal(order[order.length - 1].email, stale.email, "dead accounts are only a last resort");
+});
+
+test("summarizePoolStats reports dead accounts with a reason", () => {
+  const stale = account("stale2@example.com");
+  const fourDaysAgo = new Date(Date.now() - 4 * 24 * 3600 * 1000).toISOString();
+  const stats = statsWith({
+    [stale.email]: { imageQuota: 50, successCalls: 3, failCalls: 9, failSince: fourDaysAgo },
+  });
+  const snap = summarizePoolStats([stale], stats);
+  assert.equal(snap.accounts[0].quotaStatus, "dead");
+  assert.equal(snap.accounts[0].deadReason, "stale");
+  assert.equal(snap.quotaStats.dead, 1);
+  assert.equal(snap.quotaStats.active, 0);
 });
