@@ -16,7 +16,7 @@
 > | 导入 | 分隔符 `----` / `---` / `--` 都认，同一文件可混写；五字段仍要求 `----`（见下方「支持的账号文本格式」） |
 > | 面板 | 账号池按状态分组 + 搜索 + 排序 + 批量删除；额度表点表头排序；Token 徽章只认上游的真实反馈（`已确认` / `未确认`），不再拿本地解码 JWT 当结论 |
 >
-> 安装时请用 `https://github.com/puaicg-ship-it/magpie-gptpool`（本仓），不要用上游地址 ——
+> 安装时请用 `https://github.com/puaicg/magpie-gptpool`（本仓），不要用上游地址 ——
 > 上游的提交会覆盖上面这些改动。细节见 FORK.md「怎么装、怎么升级」。
 >
 > **和上游的关系**：包名、仓库、GUI 端口（`37990`）、页面标题都换成了自己的；但
@@ -67,7 +67,7 @@
 打开 Magpie，点顶部 **「插件」** → 切到 **「发现」** → 在最底部的输入框里填入仓库地址：
 
 ```
-https://github.com/puaicg-ship-it/magpie-gptpool
+https://github.com/puaicg/magpie-gptpool
 ```
 
 点右边的 **「安装」**，稍等几秒搞定。
@@ -75,7 +75,7 @@ https://github.com/puaicg-ship-it/magpie-gptpool
 ![在 Magpie 插件页填入 GitHub 仓库地址一键安装](docs/images/install-plugin.jpg)
 
 > [!TIP]
-> 简写 `github:puaicg-ship-it/magpie-gptpool` 同样可以被识别，填哪一个都行。
+> 简写 `github:puaicg/magpie-gptpool` 同样可以被识别，填哪一个都行。
 
 > [!WARNING]
 > 填 `yang0/magpie-gptfree`（上游原版）也能装上，但那是**没有下面这些改动的原版**。

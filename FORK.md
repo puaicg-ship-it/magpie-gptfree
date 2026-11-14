@@ -69,14 +69,14 @@ git merge upstream/main                        # 在 patch/chat-image-bridge 上
 **Magpie 里这个插件的安装源就是这个仓**，spec 写在 `plugins.json`：
 
 ```json
-{ "spec": "https://github.com/puaicg-ship-it/magpie-gptpool" }
+{ "spec": "https://github.com/puaicg/magpie-gptpool" }
 ```
 
 没有 `#<commit>` 就是跟默认分支（`patch/chat-image-bridge`）走。这意味着：
 
 - 上游推新提交**不会再影响我们** —— Magpie 比的是这个仓的 commit，不是 `yang0/magpie-gptfree`。
 - 我们自己推了新提交，**要跑 `/root/gptfree-update-plugin.sh` 才会升上去**（原因见下面的警告）。
-- 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg-ship-it/magpie-gptpool#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
+- 想彻底不再提示更新，把 spec 改成 `https://github.com/puaicg/magpie-gptpool#<完整 commit sha>`。Magpie 的 `refFixed()` 认 `#` 后面的十六进制 SHA，钉住之后不再解析任何 ref。
 
 **升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 部署机执行 `/root/gptfree-update-plugin.sh`。
 
