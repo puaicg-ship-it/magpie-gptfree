@@ -1,11 +1,13 @@
 /**
- * Standalone Magpie GUI and token-pool providers (GPT号池).
+ * Standalone Magpie GUI and token-pool providers (GPTFree号池).
  * GUI entry runs in the plugin-host and serves its own sandboxed page.
- * Primary import & management live in the left-sidebar page (GPT号池).
+ * Primary import & management live in the left-sidebar page (GPTFree号池).
  */
 import { CODEX_BASE, discoverPoolModels, poolFetch } from "./lib/codex-pool.mjs";
 import { GUI_PORT, startGuiServer } from "./lib/gui-service.mjs";
-import { createPoolConnector, POOL_MARKER, POOL_PROVIDER } from "./lib/pool-connection.mjs";
+import {
+  createPoolConnector, isLegacyPoolName, POOL_DISPLAY_NAME, POOL_MARKER, POOL_PROVIDER,
+} from "./lib/pool-connection.mjs";
 import { nativeImportMethod } from "./lib/provider-native-signin.mjs";
 
 let sharedClient = null;
@@ -37,7 +39,7 @@ export const GPTFreeGuiPlugin = async (ctx, options) => {
   const raw = options?.port ?? GUI_PORT;
   const port = Number(raw);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535)
-    throw new Error("GPT号池 GUI: invalid service port");
+    throw new Error("GPTFree号池 GUI: invalid service port");
   const connection = ensurePoolConnector(ctx) || createPoolConnector(ctx.client);
   try {
     await startGuiServer({ port, onPoolChange: () => connection.sync() });
@@ -47,9 +49,9 @@ export const GPTFreeGuiPlugin = async (ctx, options) => {
     // pool's provider side does not need the GUI service, so the plugin
     // keeps loading and its models hook stays registered. Letting this
     // throw failed the whole plugin load, which left the provider with no
-    // endpoint at all ("GPT号池 has no endpoint configured") until the
+    // endpoint at all ("GPTFree号池 has no endpoint configured") until the
     // port was freed by hand.
-    const message = "GPT号池 GUI service could not start (" +
+    const message = "GPTFree号池 GUI service could not start (" +
       String(error?.message || error) + "); the pool provider stays available, " +
       "the sidebar page is unavailable until the port is free";
     try {
@@ -83,12 +85,20 @@ export const GPTFreePoolPlugin = async (ctx = {}) => {
   return {
     config: async (cfg) => {
       cfg.provider ??= {};
-      cfg.provider[POOL_PROVIDER] ??= {
-        name: "GPT号池",
-        npm: "@ai-sdk/openai",
-        api: CODEX_BASE,
-        models: {},
-      };
+      const existing = cfg.provider[POOL_PROVIDER];
+      if (!existing) {
+        cfg.provider[POOL_PROVIDER] = {
+          name: POOL_DISPLAY_NAME,
+          npm: "@ai-sdk/openai",
+          api: CODEX_BASE,
+          models: {},
+        };
+      } else if (isLegacyPoolName(existing.name)) {
+        // 0.8.2 起显示名改成 GPTFree号池。老配置里存的还是旧名字，
+        // 而这里原来是 `??=`，永远不会覆盖 —— 升级后界面上会一直显示旧名。
+        // 只在我们自己用过的名字上就地刷新，用户手动改过的名字不动。
+        existing.name = POOL_DISPLAY_NAME;
+      }
     },
     auth: {
       provider: POOL_PROVIDER,

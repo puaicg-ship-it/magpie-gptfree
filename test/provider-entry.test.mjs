@@ -40,22 +40,48 @@ async function harness(options = {}) {
   return { service, base, page, api, close: () => service.close() };
 }
 
-test("Providers uses GPT号池 display name and URL-less direct file dialog with zero select prompt buttons", async () => {
+test("Providers uses GPTFree号池 display name and URL-less direct file dialog with zero select prompt buttons", async () => {
   const plugin = await GPTFreePoolPlugin();
   const cfg = { provider: {} };
   await plugin.config(cfg);
-  assert.equal(cfg.provider[POOL_PROVIDER].name, "GPT号池");
+  assert.equal(cfg.provider[POOL_PROVIDER].name, "GPTFree号池");
   assert.equal(plugin.auth.provider, "gptfree-pool");
   assert.equal(plugin.auth.single, undefined);
   assert.equal(plugin.auth.methods.length, 1);
   assert.equal(plugin.auth.methods[0].type, "oauth");
   assert.equal(plugin.auth.methods[0].keyless, undefined);
   assert.equal(plugin.auth.methods[0].prompts, undefined);
-  assert.equal(plugin.auth.methods[0].label.includes("GPT号池"), true);
+  assert.equal(plugin.auth.methods[0].label.includes("GPTFree号池"), true);
   assert.equal(typeof plugin.auth.methods[0].authorize, "function");
 });
 
-test("Windows native picker invokes a system OpenFileDialog titled GPT号池, never a shell or browser", async () => {
+test("config() 会把配置里的旧显示名刷成新名字，但不动用户自己改过的名字", async () => {
+  const plugin = await GPTFreePoolPlugin();
+
+  // 老配置里存的是改名前的名字 → 加载时就地升级
+  const legacy = { provider: { [POOL_PROVIDER]: { name: "GPT号池", npm: "@ai-sdk/openai", models: {} } } };
+  await plugin.config(legacy);
+  assert.equal(legacy.provider[POOL_PROVIDER].name, "GPTFree号池");
+  // 其他字段不能被顺手改掉
+  assert.equal(legacy.provider[POOL_PROVIDER].npm, "@ai-sdk/openai");
+
+  // 繁体旧名同样升级
+  const legacyTw = { provider: { [POOL_PROVIDER]: { name: "GPT號池", models: {} } } };
+  await plugin.config(legacyTw);
+  assert.equal(legacyTw.provider[POOL_PROVIDER].name, "GPTFree号池");
+
+  // 没有名字的条目补上
+  const blank = { provider: { [POOL_PROVIDER]: { models: {} } } };
+  await plugin.config(blank);
+  assert.equal(blank.provider[POOL_PROVIDER].name, "GPTFree号池");
+
+  // 用户手动改成别的名字 → 尊重，不覆盖
+  const custom = { provider: { [POOL_PROVIDER]: { name: "我的号池", models: {} } } };
+  await plugin.config(custom);
+  assert.equal(custom.provider[POOL_PROVIDER].name, "我的号池");
+});
+
+test("Windows native picker invokes a system OpenFileDialog titled GPTFree号池, never a shell or browser", async () => {
   let used;
   const value = await pickAccountTxt({
     platform: "win32",
@@ -70,7 +96,7 @@ test("Windows native picker invokes a system OpenFileDialog titled GPT号池, ne
   assert.equal(used.opts.windowsHide, true);
   assert.equal(used.args.includes("-STA"), true);
   assert.equal(used.args.join(" ").includes("OpenFileDialog"), true);
-  assert.equal(used.args.join(" ").includes("GPT号池"), true);
+  assert.equal(used.args.join(" ").includes("GPTFree号池"), true);
   for (const [os, cmd] of Object.entries(NATIVE_PICKER_COMMANDS)) {
     assert(["win32", "darwin", "linux"].includes(os));
     assert(!cmd.args.join(" ").includes("http://"));
@@ -92,7 +118,7 @@ test("clicking plugin immediately opens native picker dialog without prompt butt
   assert.equal(r1.type, "failed");
   assert.equal(r2.type, "failed");
   assert.match(r1.error, /未选择/);
-  assert.match(r1.error, /GPT号池/);
+  assert.match(r1.error, /GPTFree号池/);
 
   const ac = new AbortController();
   ac.abort();
@@ -217,7 +243,7 @@ test("native provider multi-account TXT registers every imported account individ
   } finally { await h.close(); await file.close(); }
 });
 
-test("malformed TXT picked from dialog auto-stages into sidebar GPT号池 draft without secrets in /ui HTML", async () => {
+test("malformed TXT picked from dialog auto-stages into sidebar GPTFree号池 draft without secrets in /ui HTML", async () => {
   const mixed = `bad-email----wrong\nvalid@example.com----super-pw----${seed}`;
   const file = await txtTemp(mixed);
   const h = await harness();
@@ -229,7 +255,7 @@ test("malformed TXT picked from dialog auto-stages into sidebar GPT号池 draft 
     const strictFail = await method.authorize(undefined);
     assert.equal(strictFail.type, "failed");
     assert.match(strictFail.error, /第 1 行/);
-    assert.match(strictFail.error, /左侧菜单「GPT号池」/);
+    assert.match(strictFail.error, /左侧菜单「GPTFree号池」/);
     assert(!strictFail.error.includes("super-pw"));
     assert(!strictFail.error.includes(seed));
 
@@ -245,14 +271,14 @@ test("malformed TXT picked from dialog auto-stages into sidebar GPT号池 draft 
   } finally { await h.close(); await file.close(); }
 });
 
-test("native picker unavailability failure falls back to clear sidebar GPT号池 hint", async () => {
+test("native picker unavailability failure falls back to clear sidebar GPTFree号池 hint", async () => {
   const method = nativeImportMethod({
     picker: async () => { throw new Error("unexpected dialog crash"); },
     server: async () => { throw new Error("server should not start"); },
   });
   const res = await method.authorize();
   assert.equal(res.type, "failed");
-  assert.match(res.error, /左侧菜单「GPT号池」/);
+  assert.match(res.error, /左侧菜单「GPTFree号池」/);
 });
 
 test("native provider all-failed import never marks Magpie as signed in", async () => {
@@ -272,7 +298,7 @@ test("native provider all-failed import never marks Magpie as signed in", async 
     const result = await started.callback();
     assert.equal(result.type, "failed");
     assert.match(result.error, /没有账号成功入池/);
-    assert.match(result.error, /GPT号池/);
+    assert.match(result.error, /GPTFree号池/);
   } finally { await h.close(); await file.close(); }
 });
 
@@ -280,7 +306,7 @@ test("the only import web UI is Magpie's sandboxed page; old browser tickets are
   const h = await harness();
   try {
     assert.match(h.page, /data-entry="sidebar"/);
-    assert.match(h.page, /GPT号池/);
+    assert.match(h.page, /GPTFree号池/);
     assert.match(h.page, /批量导入账号/);
     const wrong = await fetch(h.base + "/ui?ticket=" + "f".repeat(48));
     assert.equal(wrong.status, 410);

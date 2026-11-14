@@ -1,7 +1,7 @@
 {
   "name": "magpie-gptpool",
-  "version": "0.8.1",
-  "description": "GPT号池：Magpie 多账号批量导入与号池管理插件（支持独立 HTTP 登录与画图）",
+  "version": "0.8.2",
+  "description": "GPTFree号池：Magpie 多账号批量导入与号池管理插件（支持独立 HTTP 登录与画图）",
   "type": "module",
   "main": "./index.mjs",
   "bin": {
@@ -40,12 +40,12 @@
     "url": "https://github.com/puaicg/magpie-gptpool"
   },
   "magpie": {
-    "name": "GPT号池",
+    "name": "GPTFree号池",
     "page": {
-      "title": "GPT号池",
+      "title": "GPTFree号池",
       "titles": {
-        "zh": "GPT号池",
-        "zh-TW": "GPT號池"
+        "zh": "GPTFree号池",
+        "zh-TW": "GPTFree號池"
       },
       "file": "gui/entry.html",
       "service": {
@@ -58,10 +58,10 @@
       {
         "id": "batch-import",
         "menu": "provider",
-        "title": "打开 GPT号池",
+        "title": "打开 GPTFree号池",
         "titles": {
-          "zh": "打开 GPT号池",
-          "zh-TW": "開啟 GPT號池"
+          "zh": "打开 GPTFree号池",
+          "zh-TW": "開啟 GPTFree號池"
         }
       }
     ]

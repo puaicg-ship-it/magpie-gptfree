@@ -2,7 +2,7 @@
 
 基于上游 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) **0.6.6 / commit `5ab9b99`**（分支 `upstream-0.6.6` 记录了基线）。
 
-**0.8.0 起改名为 `magpie-gptpool` 独立维护**：包名、仓库、GUI 端口（`37986` → `37990`）、页面标题都是自己的了。但下面这三样**故意不动**，改它们只有坏处没有好处：
+**0.8.0 起改名为 `magpie-gptpool` 独立维护**：包名、仓库、GUI 端口（`37986` → `37990`）都是自己的了；**0.8.2 起界面显示名从「GPT号池」改成「GPTFree号池」**。但下面这三样**故意不动**，改它们只有坏处没有好处：
 
 | 不动的东西 | 为什么 |
 | --- | --- |
@@ -14,7 +14,17 @@
 
 - `main` = 上游 0.6.6，只用来跟上游对比。
 - `patch/chat-image-bridge` = **我们的代码，仓库默认分支**。Magpie 里装这个仓，默认拿到的就是它。
-- 我们自己的版本号在 `package.json` 里往上走（当前 `0.8.0`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
+- 我们自己的版本号在 `package.json` 里往上走（当前 `0.8.2`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
+
+## 显示名只有一个来源
+
+界面上的名字（菜单、页面标题、供应商列表里的「GPTFree号池 (N 个账号)」）全部来自
+`lib/pool-connection.mjs` 的 `POOL_DISPLAY_NAME`，`package.json` 里 `magpie.name` /
+`page.title` / `actions[].title` 与之保持一致。**再改名只改这几处即可**。
+
+坑：`index.mjs` 的 `config()` 原来是 `cfg.provider[POOL_PROVIDER] ??= {...}`，配置里已有条目时
+**永远不会覆盖 name** —— 改名后界面上会一直显示旧名字。现在改成：只有当现有名字是
+`GPT号池` / `GPT號池` / 空值（`isLegacyPoolName`）时才就地刷新，用户手动改过的名字不动。
 
 ## 我们改了什么
 

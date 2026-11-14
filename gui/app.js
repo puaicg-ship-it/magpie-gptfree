@@ -1250,7 +1250,7 @@
         if (removed.connectionError)
           notice("账号已移除，但 Magpie 供应商状态同步失败", true);
         else if (removed.providerConnected === false)
-          notice("最后一个账号已移除，GPT号池已自动断开");
+          notice("最后一个账号已移除，GPTFree号池已自动断开");
         else
           notice("账号已从本地号池移除，其余账号将继续轮询工作");
       }

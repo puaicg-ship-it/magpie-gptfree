@@ -1,4 +1,4 @@
-# GPT号池（magpie-gptpool）
+# GPTFree号池（magpie-gptpool）
 
 > **本插件是 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) 的分支，已改名为
 > `magpie-gptpool` 独立维护。**
@@ -31,7 +31,7 @@
 
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
 [![license](https://img.shields.io/badge/license-MIT-16845c)](./package.json)
-[![version](https://img.shields.io/badge/version-0.8.1-a36207)](./package.json)
+[![version](https://img.shields.io/badge/version-0.8.2-a36207)](./package.json)
 
 ---
 
@@ -82,13 +82,13 @@ https://github.com/puaicg/magpie-gptpool
 
 ### 第 2 步：导入账号
 
-安装后，点顶部 **「GPT号池」** 进入自己的号池页面 → **「批量导入」** 标签页：
+安装后，点顶部 **「GPTFree号池」** 进入自己的号池页面 → **「批量导入」** 标签页：
 
 1. 点 **「选择 TXT 文件」**（或直接把文件拖进虚线框），文件内容会**自动填进下面的文本框**；
 2. 如果某几行格式不对，**就在文本框里直接改**——不用重新上传，改完点「检查账号格式」看预览；
 3. 勾选「跳过格式错误行，仅导入有效账号」（可选），填好代理（需要的话），点 **「导入并授权入池」**。
 
-![在 GPT号池页面选择 TXT 或直接粘贴账号后导入](docs/images/import-accounts.jpg)
+![在 GPTFree号池页面选择 TXT 或直接粘贴账号后导入](docs/images/import-accounts.jpg)
 
 > [!TIP]
 > 分隔符写 `----`、`---` 或 `--` 都行：从别的工具复制出来的 `邮箱--密码--2FA密钥` 可以直接粘，不用先替换成四个连字符。完整格式见下面「[支持的账号文本格式](#支持的账号文本格式)」。
@@ -149,7 +149,7 @@ https://github.com/puaicg/magpie-gptpool
 
 ## 常见问题
 
-**Q：装完点「GPT号池」没反应？**
+**Q：装完点「GPTFree号池」没反应？**
 重启一次 Magpie 让它加载新插件，然后从顶部「插件」或左侧菜单进入。
 
 **Q：需要自己装 Python 吗？**
@@ -171,9 +171,9 @@ https://github.com/puaicg/magpie-gptpool
 
 ## 关于供应商页面（Providers）
 
-- 在 **GPT号池** 导入账号后，插件会**自动把每个账号分别写进 Magpie 的供应商列表**，日常**不需要去「+ 添加供应商」**重复添加。
-- 供应商页里出现 **GPT号池** 是正常的（所有认证类插件都会显示在那里），不是重复项。
-- 在供应商页直接点 **GPT号池** 或「重新登录」，会**直接弹出系统文件选择框**：格式全对就直接批量入池；有格式错误行，会自动把文本预加载到左侧菜单「GPT号池」的可编辑文本框，让你改完再导。
+- 在 **GPTFree号池** 导入账号后，插件会**自动把每个账号分别写进 Magpie 的供应商列表**，日常**不需要去「+ 添加供应商」**重复添加。
+- 供应商页里出现 **GPTFree号池** 是正常的（所有认证类插件都会显示在那里），不是重复项。
+- 在供应商页直接点 **GPTFree号池** 或「重新登录」，会**直接弹出系统文件选择框**：格式全对就直接批量入池；有格式错误行，会自动把文本预加载到左侧菜单「GPTFree号池」的可编辑文本框，让你改完再导。
 
 ---
 
