@@ -14,24 +14,165 @@
       <div class="brand">
         <span class="brand-icon">G</span>
         <div><div class="brand-title">GPTFree号池 <span class="light-title">多账号批量导入与管理</span></div>
-          <div class="brand-sub">本地加密号池 · 文本框编辑修正 · 每个账号独立同步到 Providers</div></div>
+          <div class="brand-sub">本地加密号池 · 实时额度与调用统计 · 每个账号独立同步到 Providers</div></div>
       </div>
       <span class="secure-pill"><span class="status-dot"></span> 本地运行</span>
     </header>
     <main>
-      <section class="hero">
-        <div class="eyebrow">GPT ACCOUNT POOL</div>
-        <h1>批量导入与号池管理</h1>
-        <p>选择 TXT 文件或直接粘贴多行账号进入下方编辑框，可随时编辑修正格式异常行；所有入池账号会自动分别同步到 Magpie Providers 供多账号轮询与故障转移。</p>
-      </section>
       <div class="tabs" role="tablist" aria-label="功能">
-        <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="import">批量导入</button>
-        <button type="button" role="tab" class="tab" aria-selected="false" data-tab="pool">我的账号池 <span id="poolCount" class="count">—</span></button>
-        <button type="button" role="tab" class="tab" aria-selected="false" data-tab="stats">额度统计</button>
+        <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="stats">总览 <span id="poolCount" class="count">—</span></button>
+        <button type="button" role="tab" class="tab" aria-selected="false" data-tab="import">导入账号</button>
       </div>
-      <section id="importPanel" class="panel" role="tabpanel">
+
+      <section id="overviewPanel" class="panel" role="tabpanel">
+        <div class="section-head overview-head">
+          <div>
+            <h2>号池总览</h2>
+            <div id="batchStatus" class="batch-status tiny" role="status" aria-live="polite"></div>
+          </div>
+          <div class="pool-actions">
+            <button id="refreshAllPool" type="button" class="btn primary small" title="逐个验证 Token，过期的自动重新登录，并各查一次剩余生图额度">全部检测额度</button>
+            <button id="syncProviders" type="button" class="btn secondary small">同步到 Providers</button>
+            <button id="refreshAccounts" type="button" class="btn quiet small" title="重新读取本机号池文件，不请求上游">刷新列表</button>
+            <button id="goImport" type="button" class="btn secondary small">+ 导入账号</button>
+          </div>
+        </div>
+        <div class="pool-toolbar">
+          <div id="overviewMeta" class="pool-summary">加载中…</div>
+          <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="检测用代理地址" placeholder="检测代理（可选）如 http://127.0.0.1:7890">
+        </div>
+
+        <div class="section-head with-top">
+          <h3>额度统计</h3>
+          <span class="muted tiny">实时读取 ChatGPT Web 端的 <code>image_gen</code> 额度；未检测或查询失败时如实展示，绝不伪造数值</span>
+        </div>
+        <div class="stats-grid" id="statsCards" aria-label="额度统计概览">
+          <article class="stat-card">
+            <div class="stat-heading"><span>当前账号</span><span class="stat-icon" aria-hidden="true">◉</span></div>
+            <strong id="statTotalAccounts">0</strong>
+            <span class="stat-note">号池里一共几个账号</span>
+          </article>
+          <article class="stat-card stat-card-active">
+            <div class="stat-heading"><span>可用账号</span><span class="stat-icon" aria-hidden="true">✓</span></div>
+            <strong id="statActiveAccounts">0</strong>
+            <span class="stat-note">Token 有效且有剩余生图额度</span>
+          </article>
+          <article class="stat-card">
+            <div class="stat-heading"><span>限流账号</span><span class="stat-icon" aria-hidden="true">◷</span></div>
+            <strong id="statLimitedAccounts">0</strong>
+            <span class="stat-note">剩余额度为 0 或触发限流</span>
+          </article>
+          <article class="stat-card">
+            <div class="stat-heading"><span>剩余额度</span><span class="stat-icon" aria-hidden="true">▦</span></div>
+            <strong id="statTotalQuota">0</strong>
+            <span class="stat-note" id="statQuotaNote">从上游状态接口读取</span>
+          </article>
+          <article class="stat-card">
+            <div class="stat-heading"><span>成功调用</span><span class="stat-icon" aria-hidden="true">↗</span></div>
+            <strong id="statTotalSuccess">0</strong>
+            <span class="stat-note">本机累计生图成功次数</span>
+          </article>
+          <article class="stat-card">
+            <div class="stat-heading"><span>失败调用</span><span class="stat-icon" aria-hidden="true">!</span></div>
+            <strong id="statTotalFail">0</strong>
+            <span class="stat-note">本机累计生图失败次数</span>
+          </article>
+        </div>
+
+        <div class="insights">
+          <article class="insight-card">
+            <div class="insight-head">
+              <h3>调用趋势</h3>
+              <div class="insight-tools">
+                <span id="insightRange" class="muted tiny"></span>
+                <select id="historyPeriod" aria-label="趋势粒度">
+                  <option value="day">按日</option>
+                  <option value="week">按周</option>
+                  <option value="month">按月</option>
+                  <option value="year">按年</option>
+                </select>
+              </div>
+            </div>
+            <div id="historyChart" class="history-chart" role="img" aria-label="调用趋势"></div>
+          </article>
+          <article class="insight-card">
+            <div class="insight-head">
+              <h3>失败原因</h3>
+              <span id="insightFailTotal" class="muted tiny"></span>
+            </div>
+            <div id="failBreakdown" class="fail-breakdown"></div>
+          </article>
+        </div>
+        <div id="statsHint" class="stats-hint hidden" role="status"></div>
+
+        <div class="section-head with-top">
+          <h2>失效账号分类</h2>
+          <span class="muted tiny">判死只是不再派活，账号仍在池子里；点分类可只选这一类</span>
+        </div>
+        <div id="deadGroups" class="dead-groups"></div>
+
+        <div class="section-head with-top">
+          <h2>账号列表</h2>
+          <div class="pool-actions">
+            <button id="refreshStatsQuota" type="button" class="btn quiet small" title="只重新查一遍剩余生图额度，不动 Token、不重新登录">刷新全部额度</button>
+          </div>
+        </div>
+        <p class="muted tiny" id="tableHint">点表头排序；勾选左侧复选框可批量检测额度或批量删除；点分组标题可折叠</p>
+        <div class="pool-filter">
+          <input id="poolSearch" type="search" class="pool-search" spellcheck="false" autocomplete="off" aria-label="搜索账号" placeholder="搜索打码邮箱或槽位号…">
+          <label class="filter-field">分组
+            <select id="poolGroupSelect">
+              <option value="status">按状态分组</option>
+              <option value="none">不分组</option>
+            </select>
+          </label>
+          <label class="filter-field">排序
+            <select id="poolSortSelect">
+              <option value="default">入池顺序</option>
+              <option value="quota-desc">额度 高→低</option>
+              <option value="quota-asc">额度 低→高</option>
+              <option value="recent">最近成功</option>
+              <option value="fails">失败次数</option>
+              <option value="label">槽位号</option>
+            </select>
+          </label>
+          <span id="poolFilterInfo" class="muted tiny"></span>
+        </div>
+        <div id="poolBatchBar" class="batch-bar">
+          <span id="poolBatchCount" class="batch-count">已选 0 个</span>
+          <button id="poolBatchCheck" type="button" class="btn secondary small">批量检测额度</button>
+          <button id="poolBatchRemove" type="button" class="btn danger small">批量删除</button>
+          <button id="poolBatchClear" type="button" class="btn secondary small">取消选择</button>
+          <span id="poolBatchStatus" class="batch-status" role="status" aria-live="polite"></span>
+          <label class="inline-check"><input type="checkbox" id="poolPickAll"> <span>全选当前列表</span></label>
+        </div>
+        <div id="poolList" class="table-wrap pool-table-wrap">
+          <table class="pool-table">
+            <colgroup>
+              <col class="col-pick"><col class="col-label"><col class="col-plan"><col class="col-status">
+              <col class="col-quota"><col class="col-calls"><col class="col-checked"><col class="col-act">
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="pick"><input id="pickAll" type="checkbox" aria-label="全选账号"></th>
+                <th><button class="sort-th" type="button" data-sort="label">账号</button></th>
+                <th><button class="sort-th" type="button" data-sort="plan">类型</button></th>
+                <th><button class="sort-th" type="button" data-sort="status">状态</button></th>
+                <th><button class="sort-th" type="button" data-sort="quota">剩余生图额度</button></th>
+                <th><button class="sort-th" type="button" data-sort="calls">成功 / 失败</button></th>
+                <th><button class="sort-th" type="button" data-sort="checked">最近检测</button></th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="statsRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="importPanel" class="panel hidden" role="tabpanel">
+        <p class="intro">选择 TXT 文件或直接粘贴多行账号进入下方编辑框，可随时编辑修正格式异常行；所有入池账号会自动分别同步到 Magpie Providers 供多账号轮询与故障转移。</p>
         <div class="section-head"><h2><span class="step">01</span> 批量导入账号</h2>
-          <span class="muted tiny">单批最多 100 条 · 可多次追加，累计支持 1000 个多账号轮询</span></div>
+          <span class="muted tiny">单批最多 100 条 · 可多次追加，累计支持 1000 个账号轮询</span></div>
 
         <div class="format-guide">
           <div class="format-title">支持导入的账号格式规范（每行一条，分隔符兼容 <code>----</code>、<code>---</code> 或 <code>--</code>）：</div>
@@ -102,158 +243,6 @@
           <div id="events" class="events" role="log" aria-live="polite"></div>
           <div class="actions"><button id="cancelButton" class="btn danger" type="button">停止导入</button>
             <button id="againButton" class="btn secondary hidden" type="button">清空并导入下一批</button></div>
-        </div>
-      </section>
-
-      <section id="poolPanel" class="panel hidden" role="tabpanel">
-        <div class="section-head">
-          <h2>我的多账号池</h2>
-          <div class="pool-actions">
-            <button id="refreshAllPool" type="button" class="btn primary small">全部检测 / 刷新授权</button>
-            <button id="syncProviders" type="button" class="btn secondary small">同步到 Providers</button>
-            <button id="refreshAccounts" type="button" class="btn secondary small">刷新列表</button>
-            <button id="goImport" type="button" class="btn secondary small">+ 继续批量导入</button>
-          </div>
-        </div>
-        <p class="muted tiny">每个入池账号都会分别同步到 Magpie Providers 成为独立可勾选账号（支持设为首选与独立并发）；若在 Providers 误删了条目，可点「同步到 Providers」立即恢复。</p>
-        <div class="pool-toolbar">
-          <div id="poolSummary" class="pool-summary">加载中…</div>
-          <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="刷新用代理地址" placeholder="刷新代理（可选）如 http://127.0.0.1:7890">
-        </div>
-        <div class="pool-filter">
-          <input id="poolSearch" type="search" class="pool-search" spellcheck="false" autocomplete="off" aria-label="搜索账号" placeholder="搜索打码邮箱或槽位号…">
-          <label class="filter-field">分组
-            <select id="poolGroupSelect">
-              <option value="status">按状态分组</option>
-              <option value="none">不分组</option>
-            </select>
-          </label>
-          <label class="filter-field">排序
-            <select id="poolSortSelect">
-              <option value="default">入池顺序</option>
-              <option value="quota-desc">额度 高→低</option>
-              <option value="quota-asc">额度 低→高</option>
-              <option value="recent">最近成功</option>
-              <option value="fails">失败次数</option>
-              <option value="label">槽位号</option>
-            </select>
-          </label>
-          <span id="poolFilterInfo" class="muted tiny"></span>
-        </div>
-        <div id="poolBatchBar" class="batch-bar">
-          <span id="poolBatchCount">已选 0 个</span>
-          <button id="poolBatchCheck" type="button" class="btn secondary small">批量检测额度</button>
-          <button id="poolBatchRemove" type="button" class="btn danger small">批量删除</button>
-          <button id="poolBatchClear" type="button" class="btn secondary small">取消选择</button>
-          <span id="poolBatchStatus" class="batch-status" role="status" aria-live="polite"></span>
-          <label class="inline-check"><input type="checkbox" id="poolPickAll"> <span>全选当前列表</span></label>
-        </div>
-        <div id="poolList" class="pool-list"></div>
-      </section>
-
-      <section id="statsPanel" class="panel hidden" role="tabpanel">
-        <div class="section-head">
-          <h2>生图额度统计</h2>
-          <div class="pool-actions">
-            <button id="refreshStatsQuota" type="button" class="btn primary small">刷新全部额度</button>
-            <button id="reloadStats" type="button" class="btn secondary small">重新读取</button>
-          </div>
-        </div>
-        <p class="muted tiny">实时读取号池各账号在 ChatGPT Web 端的 <code>image_gen</code> 生图剩余额度及本机调用统计；未检测或查询失败时如实展示状态，绝不伪造数值。</p>
-        <div class="pool-toolbar">
-          <div id="statsMeta" class="pool-summary">加载中…</div>
-          <input id="statsProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="额度检测代理地址" placeholder="检测代理（可选）如 http://127.0.0.1:7890">
-        </div>
-        <div class="stats-grid" id="statsCards" aria-label="额度统计概览">
-          <article class="stat-card">
-            <div class="stat-heading"><span>当前账号</span><span class="stat-icon" aria-hidden="true">◉</span></div>
-            <strong id="statTotalAccounts">0</strong>
-            <span class="stat-note">号池中已入池账号数</span>
-          </article>
-          <article class="stat-card stat-card-active">
-            <div class="stat-heading"><span>可用账号</span><span class="stat-icon" aria-hidden="true">✓</span></div>
-            <strong id="statActiveAccounts">0</strong>
-            <span class="stat-note">Token 有效且有剩余生图额度</span>
-          </article>
-          <article class="stat-card">
-            <div class="stat-heading"><span>限流账号</span><span class="stat-icon" aria-hidden="true">◷</span></div>
-            <strong id="statLimitedAccounts">0</strong>
-            <span class="stat-note">剩余额度为 0 或触发限流</span>
-          </article>
-          <article class="stat-card">
-            <div class="stat-heading"><span>剩余额度</span><span class="stat-icon" aria-hidden="true">▦</span></div>
-            <strong id="statTotalQuota">0</strong>
-            <span class="stat-note" id="statQuotaNote">从上游状态接口读取</span>
-          </article>
-          <article class="stat-card">
-            <div class="stat-heading"><span>成功调用</span><span class="stat-icon" aria-hidden="true">↗</span></div>
-            <strong id="statTotalSuccess">0</strong>
-            <span class="stat-note">本机累计生图成功次数</span>
-          </article>
-          <article class="stat-card">
-            <div class="stat-heading"><span>失败调用</span><span class="stat-icon" aria-hidden="true">!</span></div>
-            <strong id="statTotalFail">0</strong>
-            <span class="stat-note">本机累计生图失败次数</span>
-          </article>
-        </div>
-        <div class="insights">
-          <article class="insight-card">
-            <div class="insight-head">
-              <h3>调用趋势</h3>
-              <div class="insight-tools">
-                <span id="insightRange" class="muted tiny"></span>
-                <select id="historyPeriod" aria-label="趋势粒度">
-                  <option value="day">按日</option>
-                  <option value="week">按周</option>
-                  <option value="month">按月</option>
-                  <option value="year">按年</option>
-                </select>
-              </div>
-            </div>
-            <div id="historyChart" class="history-chart" role="img" aria-label="调用趋势"></div>
-          </article>
-          <article class="insight-card">
-            <div class="insight-head">
-              <h3>失败原因</h3>
-              <span id="insightFailTotal" class="muted tiny"></span>
-            </div>
-            <div id="failBreakdown" class="fail-breakdown"></div>
-          </article>
-        </div>
-        <div id="statsHint" class="stats-hint hidden" role="status"></div>
-        <div class="section-head with-top">
-          <h2>失效账号分类</h2>
-          <span class="muted tiny">判死只是不再派活，账号仍在池子里；点分类可只选这一类</span>
-        </div>
-        <div id="deadGroups" class="dead-groups"></div>
-        <div class="section-head with-top">
-          <h2>账号额度明细</h2>
-          <span id="statsTableSub" class="muted tiny">点击表头排序；勾选左侧复选框可批量检测或批量删除</span>
-        </div>
-        <div id="batchBar" class="batch-bar">
-          <span id="batchCount">已选 0 个</span>
-          <button id="batchCheck" type="button" class="btn secondary small">批量检测额度</button>
-          <button id="batchRemove" type="button" class="btn danger small">批量删除</button>
-          <button id="batchClear" type="button" class="btn secondary small">取消选择</button>
-          <span id="batchStatus" class="batch-status" role="status" aria-live="polite"></span>
-          <span class="muted tiny">勾选表头复选框可全选</span>
-        </div>
-        <div class="table-wrap stats-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th class="pick"><input id="pickAll" type="checkbox" aria-label="全选账号"></th>
-                <th><button class="sort-th" type="button" data-sort="label">账号</button></th>
-                <th><button class="sort-th" type="button" data-sort="plan">类型</button></th>
-                <th><button class="sort-th" type="button" data-sort="status">状态</button></th>
-                <th><button class="sort-th" type="button" data-sort="quota">剩余生图额度</button></th>
-                <th><button class="sort-th" type="button" data-sort="calls">成功 / 失败</button></th>
-                <th><button class="sort-th" type="button" data-sort="checked">最近检测</button></th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="statsRows"></tbody>
-          </table>
         </div>
       </section>
       <div id="notice" class="notice hidden" role="status"></div>
