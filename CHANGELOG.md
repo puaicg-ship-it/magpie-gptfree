@@ -4,6 +4,16 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.8.11] - 2026-11-15
+
+### 变更
+
+- 面板新增「图片」页：总张数 / 总占用 / 最早最晚 / 近 14 天柱状图，列表支持按大小与时间排序、日期区间筛选、分页与缩略图按需加载
+- 图片保留天数可配（1–90，默认 7 天），面板改完立刻生效；环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS 仍然优先并锁住下拉
+- 手动清理：勾选 / 按住拖动框选 / Shift 连选，可全选整个筛选结果（跨页），删除选中或清理早于 N 天；二次确认 + 文件名白名单 + 路径前缀校验 + 单次 500 上限 + 逐条容错
+- 新增接口 /api/images、/api/images/delete、/api/images/purge、/api/images/file（缩略图同源透传，不受 CSP 拦截）
+- 维护者脚本（release / update-server / upstream-status）移出公开仓库并加进 .gitignore，部署目标改从 ~/.magpie-gptpool-release.env 读取，避免主机名与 IP 进入公开历史
+
 ## [0.8.10] - 2026-11-15
 
 ### 变更
