@@ -195,11 +195,22 @@ test("MAGPIE_GPTFREE_IMAGE_REPLY=url keeps 0.8.8: one bare URL per line, streami
   try {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
     const jpg = Buffer.from("ffd8ffe000104a464946", "hex").toString("base64");
-    const forward = async () => new Response(JSON.stringify({
-      created: 1, data: [{ b64_json: png }, { b64_json: jpg }],
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    // 上游单次只出一张：n=2 就打两次，每次一张。按调用顺序第一张 png、第二张 jpg。
+    const calls = [];
+    let inFlight = 0, peak = 0;
+    const forward = async (_endpoint, body) => {
+      const payload = JSON.parse(body);
+      const index = calls.push(payload) - 1;
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      inFlight--;
+      return new Response(JSON.stringify({
+        created: 1, data: [{ b64_json: index === 0 ? png : jpg }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
 
-    // 非流式：两行，每行一个绝对地址，顺序与 links 一致（第一张 png、第二张 jpg）。
+    // 非流式：两行，每行一个绝对地址，顺序与提交顺序一致（第一张 png、第二张 jpg）。
     const plain = await bridgeChatToImage(
       JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n: 2 }),
       {}, { forward },
@@ -209,6 +220,9 @@ test("MAGPIE_GPTFREE_IMAGE_REPLY=url keeps 0.8.8: one bare URL per line, streami
     assert.equal(lines.length, 2);
     assert.match(lines[0], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.png$/);
     assert.match(lines[1], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.jpg$/);
+    assert.equal(calls.length, 2, "n=2 要打两次上游");
+    assert(calls.every((c) => c.n === 1), "每次请求的 n 必须是 1，否则上游会重复计数");
+    assert.equal(peak, 2, "并发上限是 2：两张应该同时在跑");
 
     // 流式：delta.content 同样是纯地址，不夹 markdown。
     const streamed = await bridgeChatToImage(
@@ -242,9 +256,14 @@ test("both mode groups each image as inline + bare URL, blank line between group
   try {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
     const jpg = Buffer.from("ffd8ffe000104a464946", "hex").toString("base64");
-    const forward = async () => new Response(JSON.stringify({
-      created: 1, data: [{ b64_json: png }, { b64_json: jpg }],
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    // 一次调用只出一张（上游就是这样），n=2 靠桥接层打两次。
+    let callIndex = 0;
+    const forward = async () => {
+      const b64 = callIndex++ % 2 === 0 ? png : jpg;
+      return new Response(JSON.stringify({ created: 1, data: [{ b64_json: b64 }] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    };
 
     const plain = await bridgeChatToImage(
       JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n: 2 }),
@@ -283,6 +302,110 @@ test("both mode groups each image as inline + bare URL, blank line between group
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
     delete process.env.MAGPIE_GPTFREE_HOME;
     delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("multi-image: a single failure doesn't kill the request; only all-failure errors out", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-partial-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "url";
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const jsonHeaders = { "content-type": "application/json" };
+    const request = (n) => JSON.stringify({
+      model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n,
+    });
+
+    // 第一张成功、第二张 502：把成功那张给出去，不报错。
+    let call = 0;
+    const halfBroken = async () => {
+      if (call++ === 1) {
+        return new Response(JSON.stringify({ error: { message: "upstream glitch" } }), {
+          status: 502, headers: jsonHeaders,
+        });
+      }
+      return new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+        status: 200, headers: jsonHeaders,
+      });
+    };
+    const partial = await bridgeChatToImage(request(2), {}, { forward: halfBroken });
+    assert.equal(partial.status, 200);
+    const lines = (await partial.json()).choices[0].message.content.split("\n");
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.png$/);
+
+    // 两张都失败：502，文案沿用上游的。
+    const allBroken = async () => new Response(JSON.stringify({ error: { message: "号池里没号能出图" } }), {
+      status: 502, headers: jsonHeaders,
+    });
+    const dead = await bridgeChatToImage(request(2), {}, { forward: allBroken });
+    assert.equal(dead.status, 502);
+    assert.match((await dead.json()).error.message, /没号能出图/);
+
+    // 预算到点（request_timeout）对外仍报 400，免得网关把一次失败重试成两次。
+    const timedOut = async () => new Response(JSON.stringify({
+      error: { message: "生图超时", code: "request_timeout" },
+    }), { status: 504, headers: jsonHeaders });
+    const timeout = await bridgeChatToImage(request(1), {}, { forward: timedOut });
+    assert.equal(timeout.status, 400);
+    assert.equal((await timeout.json()).error.code, "request_timeout");
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("multi-image: n=4 queues behind a concurrency cap of 2 and keeps submission order", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-cap-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "url";
+  try {
+    // 四种不同的字节头 → 落盘后扩展名不同，正好能验证「顺序 = 提交顺序」。
+    const bodies = [
+      "89504e470d0a1a0a0000000d49484452", // png
+      "ffd8ffe000104a464946",             // jpg
+      "52494646aabbccdd",                 // webp
+      "474946383961aabbccdd",             // gif
+    ].map((hex) => Buffer.from(hex, "hex").toString("base64"));
+    const order = [];
+    let inFlight = 0, peak = 0;
+    const forward = async (_endpoint, body) => {
+      assert.equal(JSON.parse(body).n, 1);
+      const index = order.push(null) - 1;
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inFlight--;
+      return new Response(JSON.stringify({ created: 1, data: [{ b64_json: bodies[index] }] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    };
+
+    const response = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "four cats" }], n: 4 }),
+      {}, { forward },
+    );
+    assert.equal(response.status, 200);
+    const lines = (await response.json()).choices[0].message.content.split("\n");
+    assert.equal(lines.length, 4);
+    assert.match(lines[0], /\.png$/);
+    assert.match(lines[1], /\.jpg$/);
+    assert.match(lines[2], /\.webp$/);
+    assert.match(lines[3], /\.gif$/);
+    assert.equal(peak, 2, "同时在跑的请求不能超过 2 个");
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
     await rm(dir, { recursive: true, force: true });
   }
 });

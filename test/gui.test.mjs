@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createGuiService, GUI_PORT } from "../lib/gui-service.mjs";
+import { createGuiService, GUI_PORT, startGuiServer } from "../lib/gui-service.mjs";
 import { createInMemoryStatsStore, recordImageCall, recordQuotaCheck } from "../lib/pool-stats.mjs";
 import { accountSlotTag, formatAccountSlotLabel } from "../lib/pool-connection.mjs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { GPTFreeGuiPlugin } from "../index.mjs";
 
@@ -739,6 +740,38 @@ test("reply mode is editable from the panel and says so when an env var override
     if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
     else process.env.MAGPIE_GPTFREE_HOME = previousHome;
     delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("startGuiServer retries a busy port, and recovers once the old host releases it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-port-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  // 占住一个端口，模拟「热更新时旧 host 还没释放端口」。
+  const blocker = createServer();
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  const port = blocker.address().port;
+  let service = null;
+  try {
+    // 端口一直被占：退避重试完仍然失败，错误文案里要写清试了几次（warn 会带出去）。
+    await assert.rejects(
+      () => startGuiServer({ port, retryDelays: [10, 10, 10] }),
+      (err) => /port already in use/.test(err.message) && /tried 4 time/.test(err.message),
+    );
+
+    // 旧 host 让出端口后再调一次就能起来 —— 这就是热更新后页面能自己恢复的原因，
+    // 不用再 docker restart。
+    await new Promise((resolve) => blocker.close(resolve));
+    service = await startGuiServer({ port, retryDelays: [10, 10] });
+    const html = await (await fetch(`http://127.0.0.1:${port}/ui`)).text();
+    assert.match(html, /GPTFree号池/);
+  } finally {
+    if (service) await service.close();
+    if (blocker.listening) await new Promise((resolve) => blocker.close(resolve));
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
     await rm(dir, { recursive: true, force: true });
   }
 });
