@@ -133,9 +133,12 @@ test("local bridge: chat/completions with an image model goes through /images/ge
 
     const body = await response.json();
     assert.equal(body.object, "chat.completion");
+    // 正文是纯地址，不带 markdown：客户端「复制」出来能直接用。
     // 没设 MAGPIE_GPTFREE_PUBLIC_BASE 时回相对路径：代码里不绑任何具体主机。
-    assert.match(body.choices[0].message.content, /^!\[image\]\(\/img\/.+\.png\)$/);
-    const saved = await readFile(join(dir, body.choices[0].message.content.match(/\/img\/(.+)\)$/)[1]));
+    const content = body.choices[0].message.content;
+    assert.match(content, /^\/img\/[^()\s]+\.png$/);
+    assert(!content.includes("![image]("), "正文不能夹 markdown");
+    const saved = await readFile(join(dir, content.replace(/^\/img\//, "")));
     assert.equal(saved.length > 0, true);
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
@@ -160,10 +163,79 @@ test("an image link becomes absolute only when MAGPIE_GPTFREE_PUBLIC_BASE says s
     );
     const body = await response.json();
     // 结尾的斜杠要去掉，不能拼出 //img/。
-    assert.match(body.choices[0].message.content, /^!\[image\]\(https:\/\/images\.example\.test\/img\/.+\.png\)$/);
+    const content = body.choices[0].message.content;
+    assert.match(content, /^https:\/\/images\.example\.test\/img\/[^()\s]+\.png$/);
+    assert(!content.includes("![image]("), "正文不能夹 markdown");
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
     delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("local bridge: n=2 returns one URL per line in upstream order, streaming included", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-n2-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const jpg = Buffer.from("ffd8ffe000104a464946", "hex").toString("base64");
+    const forward = async () => new Response(JSON.stringify({
+      created: 1, data: [{ b64_json: png }, { b64_json: jpg }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+
+    // 非流式：两行，每行一个绝对地址，顺序与 links 一致（第一张 png、第二张 jpg）。
+    const plain = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n: 2 }),
+      {}, { forward },
+    );
+    const content = (await plain.json()).choices[0].message.content;
+    const lines = content.split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.png$/);
+    assert.match(lines[1], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.jpg$/);
+
+    // 流式：delta.content 同样是纯地址，不夹 markdown。
+    const streamed = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n: 2, stream: true }),
+      {}, { forward },
+    );
+    assert.match(streamed.headers.get("content-type"), /text\/event-stream/);
+    const raw = await streamed.text();
+    const deltas = raw.split("\n\n")
+      .filter((chunk) => chunk.startsWith("data: ") && !chunk.includes("[DONE]"))
+      .map((chunk) => JSON.parse(chunk.slice(6)).choices[0].delta.content)
+      .filter((text) => typeof text === "string");
+    assert.equal(deltas.length, 1);
+    assert.equal(deltas[0].split("\n").length, 2);
+    assert(!deltas[0].includes("![image]("), "流式正文也不能夹 markdown");
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("MAGPIE_GPTFREE_IMAGE_REPLY=markdown restores the old inline-image reply", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-md-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "markdown";
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const response = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "a cat" }] }),
+      {},
+      {
+        forward: async () => new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        }),
+      },
+    );
+    const content = (await response.json()).choices[0].message.content;
+    assert.match(content, /^!\[image\]\(\/img\/[^()\s]+\.png\)$/);
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
     await rm(dir, { recursive: true, force: true });
   }
 });
