@@ -692,3 +692,53 @@ test("GUI removes and re-checks a whole selection in one request", async () => {
     assert.equal(removed.length, 2);
   } finally { await h.close(); }
 });
+
+test("reply mode is editable from the panel and says so when an env var overrides it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-settings-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  let h = null;
+  try {
+    h = await harness({
+      poolRead: async () => [],
+      statsStore: createInMemoryStatsStore(),
+    });
+
+    // 没设置过：默认 both，没人压着。
+    const initial = await h.api("stats");
+    assert.equal(initial.status, 200);
+    assert.deepEqual(initial.json.imageReply, {
+      mode: "both", source: "default", modes: ["both", "url", "markdown"], locked: false,
+    });
+
+    // 面板改一次：写文件、立即生效。
+    const saved = await h.api("settings", { imageReply: "url" });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.json.mode, "url");
+    assert.equal(saved.json.source, "settings");
+    assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).imageReply, "url");
+    assert.equal((await h.api("stats")).json.imageReply.mode, "url");
+
+    // 不认识的值 400，而且不能把已有设置写坏。
+    const bad = await h.api("settings", { imageReply: "gif" });
+    assert.equal(bad.status, 400);
+    assert.equal((await h.api("stats")).json.imageReply.mode, "url");
+
+    // 环境变量压着：写入照样落盘，但必须如实说「不生效」，并标记 locked。
+    process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "markdown";
+    const locked = await h.api("stats");
+    assert.equal(locked.json.imageReply.locked, true);
+    assert.equal(locked.json.imageReply.mode, "markdown");
+    const attempt = await h.api("settings", { imageReply: "both" });
+    assert.equal(attempt.status, 200);
+    assert.equal(attempt.json.mode, "markdown");
+    assert.equal(attempt.json.locked, true);
+    assert.match(attempt.json.message, /环境变量/);
+  } finally {
+    if (h) await h.close();
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -8,6 +8,7 @@ import {
   CODEX_BASE, discoverPoolModels, poolFetch, probeAccountImageQuota, refreshPoolAccount,
 } from "../lib/codex-pool.mjs";
 import { bridgeChatToImage } from "../lib/chat-image-bridge.mjs";
+import { readImageReplyMode, writeImageReplyMode } from "../lib/reply-settings.mjs";
 import {
   IMAGE_MODEL_ID,
   buildImageModelCatalog,
@@ -110,6 +111,8 @@ test("image model catalog exposes Magpie host.js @ai-sdk/openai-compatible schem
 test("local bridge: chat/completions with an image model goes through /images/generations", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-"));
   process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  // 回复形态从 poolDir()/settings.json 读，也指到临时目录，免得读到开发机上的真实设置。
+  process.env.MAGPIE_GPTFREE_HOME = dir;
   try {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
     let forwarded = null;
@@ -133,15 +136,19 @@ test("local bridge: chat/completions with an image model goes through /images/ge
 
     const body = await response.json();
     assert.equal(body.object, "chat.completion");
-    // 正文是纯地址，不带 markdown：客户端「复制」出来能直接用。
-    // 没设 MAGPIE_GPTFREE_PUBLIC_BASE 时回相对路径：代码里不绑任何具体主机。
+    // 默认 both：第一行内联图负责渲染，第二行裸地址负责复制转发，两行 URL 相同。
+    // 没设 MAGPIE_GPTFREE_PUBLIC_BASE 时两行都回相对路径：代码里不绑任何具体主机。
     const content = body.choices[0].message.content;
-    assert.match(content, /^\/img\/[^()\s]+\.png$/);
-    assert(!content.includes("![image]("), "正文不能夹 markdown");
-    const saved = await readFile(join(dir, content.replace(/^\/img\//, "")));
+    const lines = content.split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /^!\[image\]\(\/img\/[^()\s]+\.png\)$/);
+    assert.match(lines[1], /^\/img\/[^()\s]+\.png$/);
+    assert.equal(lines[0].replace(/^!\[image\]\(|\)$/g, ""), lines[1]);
+    const saved = await readFile(join(dir, lines[1].replace(/^\/img\//, "")));
     assert.equal(saved.length > 0, true);
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
     await rm(dir, { recursive: true, force: true });
   }
 });
@@ -149,6 +156,8 @@ test("local bridge: chat/completions with an image model goes through /images/ge
 test("an image link becomes absolute only when MAGPIE_GPTFREE_PUBLIC_BASE says so", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-base-"));
   process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  // 回复形态从 poolDir()/settings.json 读，也指到临时目录，免得读到开发机上的真实设置。
+  process.env.MAGPIE_GPTFREE_HOME = dir;
   process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://images.example.test/";
   try {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
@@ -163,20 +172,26 @@ test("an image link becomes absolute only when MAGPIE_GPTFREE_PUBLIC_BASE says s
     );
     const body = await response.json();
     // 结尾的斜杠要去掉，不能拼出 //img/。
-    const content = body.choices[0].message.content;
-    assert.match(content, /^https:\/\/images\.example\.test\/img\/[^()\s]+\.png$/);
-    assert(!content.includes("![image]("), "正文不能夹 markdown");
+    const lines = body.choices[0].message.content.split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /^!\[image\]\(https:\/\/images\.example\.test\/img\/[^()\s]+\.png\)$/);
+    assert.match(lines[1], /^https:\/\/images\.example\.test\/img\/[^()\s]+\.png$/);
+    assert.equal(lines[0].replace(/^!\[image\]\(|\)$/g, ""), lines[1]);
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
     delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("local bridge: n=2 returns one URL per line in upstream order, streaming included", async () => {
+test("MAGPIE_GPTFREE_IMAGE_REPLY=url keeps 0.8.8: one bare URL per line, streaming included", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-n2-"));
   process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  // 回复形态从 poolDir()/settings.json 读，也指到临时目录，免得读到开发机上的真实设置。
+  process.env.MAGPIE_GPTFREE_HOME = dir;
   process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "url";
   try {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
     const jpg = Buffer.from("ffd8ffe000104a464946", "hex").toString("base64");
@@ -211,6 +226,62 @@ test("local bridge: n=2 returns one URL per line in upstream order, streaming in
     assert(!deltas[0].includes("![image]("), "流式正文也不能夹 markdown");
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("both mode groups each image as inline + bare URL, blank line between groups, streaming included", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-both-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  // 回复形态从 poolDir()/settings.json 读，也指到临时目录，免得读到开发机上的真实设置。
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const jpg = Buffer.from("ffd8ffe000104a464946", "hex").toString("base64");
+    const forward = async () => new Response(JSON.stringify({
+      created: 1, data: [{ b64_json: png }, { b64_json: jpg }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+
+    const plain = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n: 2 }),
+      {}, { forward },
+    );
+    const content = (await plain.json()).choices[0].message.content;
+    const lines = content.split("\n");
+    // 组内两行不空行，组与组之间空一行。
+    assert.equal(lines.length, 5);
+    assert.match(lines[0], /^!\[image\]\(https:\/\/rk\.example\.test\/img\/[^()\s]+\.png\)$/);
+    assert.match(lines[1], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.png$/);
+    assert.equal(lines[2], "", "组与组之间要空一行");
+    assert.match(lines[3], /^!\[image\]\(https:\/\/rk\.example\.test\/img\/[^()\s]+\.jpg\)$/);
+    assert.match(lines[4], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.jpg$/);
+    assert.equal(lines[0].replace(/^!\[image\]\(|\)$/g, ""), lines[1]);
+    assert.equal(lines[3].replace(/^!\[image\]\(|\)$/g, ""), lines[4]);
+
+    // 流式 delta.content 与非流式完全一致（整段一次性下发）。
+    const streamed = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "two cats" }], n: 2, stream: true }),
+      {}, { forward },
+    );
+    const raw = await streamed.text();
+    const deltas = raw.split("\n\n")
+      .filter((chunk) => chunk.startsWith("data: ") && !chunk.includes("[DONE]"))
+      .map((chunk) => JSON.parse(chunk.slice(6)).choices[0].delta.content)
+      .filter((text) => typeof text === "string");
+    assert.equal(deltas.length, 1);
+    // 每次调用都会落新文件（文件名带随机串），所以比结构不比字面量。
+    const streamedLines = deltas[0].split("\n");
+    assert.equal(streamedLines.length, 5);
+    assert.match(streamedLines[0], /^!\[image\]\(https:\/\/rk\.example\.test\/img\/[^()\s]+\.png\)$/);
+    assert.equal(streamedLines[2], "");
+    assert.match(streamedLines[4], /^https:\/\/rk\.example\.test\/img\/[^()\s]+\.jpg$/);
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
     delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
     await rm(dir, { recursive: true, force: true });
   }
@@ -219,6 +290,8 @@ test("local bridge: n=2 returns one URL per line in upstream order, streaming in
 test("MAGPIE_GPTFREE_IMAGE_REPLY=markdown restores the old inline-image reply", async () => {
   const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-md-"));
   process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  // 回复形态从 poolDir()/settings.json 读，也指到临时目录，免得读到开发机上的真实设置。
+  process.env.MAGPIE_GPTFREE_HOME = dir;
   process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "markdown";
   try {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
@@ -235,6 +308,61 @@ test("MAGPIE_GPTFREE_IMAGE_REPLY=markdown restores the old inline-image reply", 
     assert.match(content, /^!\[image\]\(\/img\/[^()\s]+\.png\)$/);
   } finally {
     delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the reply mode can be set from the panel (settings file), and env still overrides it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-settings-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const reply = async () => {
+      const response = await bridgeChatToImage(
+        JSON.stringify({ model: "gpt-image-2", messages: [{ role: "user", content: "a cat" }] }),
+        {},
+        {
+          forward: async () => new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+            status: 200, headers: { "content-type": "application/json" },
+          }),
+        },
+      );
+      return (await response.json()).choices[0].message.content;
+    };
+
+    // 没设置过：默认 both。
+    assert.equal((await readImageReplyMode()).source, "default");
+    assert.equal((await readImageReplyMode()).mode, "both");
+
+    // 面板写入 url：桥接立刻跟着变，不用重启、不用环境变量。
+    assert.equal(await writeImageReplyMode("url"), "url");
+    assert.deepEqual(await readImageReplyMode(), { mode: "url", source: "settings" });
+    assert.match(await reply(), /^\/img\/[^()\s]+\.png$/);
+
+    // 面板写入 markdown。
+    await writeImageReplyMode("markdown");
+    assert.match(await reply(), /^!\[image\]\(\/img\/[^()\s]+\.png\)$/);
+
+    // 环境变量优先于设置文件。
+    process.env.MAGPIE_GPTFREE_IMAGE_REPLY = "url";
+    assert.deepEqual(await readImageReplyMode(), { mode: "url", source: "env" });
+    assert.match(await reply(), /^\/img\/[^()\s]+\.png$/);
+    delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+
+    // 不认识的值写不进去，也不会把文件写坏。
+    await assert.rejects(() => writeImageReplyMode("gif"), (err) => err.status === 400);
+    assert.deepEqual(await readImageReplyMode(), { mode: "markdown", source: "settings" });
+
+    // 文件被写坏（半截 JSON）时退回默认，不影响出图。
+    await writeFile(join(dir, "settings.json"), "{ broken", "utf8");
+    assert.deepEqual(await readImageReplyMode(), { mode: "both", source: "default" });
+    assert.equal((await reply()).split("\n").length, 2);
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
     delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
     await rm(dir, { recursive: true, force: true });
   }

@@ -777,6 +777,20 @@
     syncSelection();
     renderTable();
     renderBatchBar();
+    renderImageReplyMode();
+  }
+
+  // 回复格式：值跟统计一起从 /api/stats 下发，不额外发请求。
+  // 环境变量压着设置文件时下拉置灰 —— 让用户改一个改了不生效的东西最坑。
+  function renderImageReplyMode() {
+    const select = $("imageReplyMode");
+    const info = snapshot?.imageReply;
+    if (!select || !info) return;
+    select.value = info.mode;
+    select.disabled = Boolean(info.locked);
+    select.title = info.locked
+      ? `环境变量 MAGPIE_GPTFREE_IMAGE_REPLY=${info.mode} 正在强制覆盖，改这里不生效`
+      : "图片模型经 chat/completions 回复时的正文形态；复制出来的是这段正文文本";
   }
 
   function renderMeta(accounts) {
@@ -1742,6 +1756,22 @@
     $("historyPeriod")?.addEventListener("change", (event) => {
       historyPeriod = HISTORY_VIEWS[event.target.value] ? event.target.value : "day";
       renderHistory(snapshot);
+    });
+    // 回复格式：写进本机设置文件，立即生效（不用重启插件宿主）。
+    $("imageReplyMode")?.addEventListener("change", async (event) => {
+      const select = event.target;
+      const previous = snapshot?.imageReply?.mode || "both";
+      select.disabled = true;
+      try {
+        const result = await api("settings", { imageReply: select.value });
+        notice(result.message || "回复格式已更新");
+        await refreshData({ quiet: true });
+      } catch (err) {
+        // 写失败就退回原值：下拉停在一个没生效的形态上比报错更误导。
+        select.value = previous;
+        select.disabled = false;
+        notice(err.message, true);
+      }
     });
 
     window.addEventListener("focus", () => { loadPendingDraft(); });

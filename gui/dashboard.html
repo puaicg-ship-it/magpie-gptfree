@@ -39,7 +39,16 @@
         </div>
         <div class="pool-toolbar">
           <div id="overviewMeta" class="pool-summary">加载中…</div>
-          <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="检测用代理地址" placeholder="检测代理（可选）如 http://127.0.0.1:7890">
+          <div class="pool-toolbar-side">
+            <label class="filter-field" title="图片模型经 chat/completions 回复时的正文形态；客户端「复制」复制的是正文文本，所以要带一行裸地址">回复格式
+              <select id="imageReplyMode" aria-label="图片回复格式">
+                <option value="both">图 + 地址</option>
+                <option value="url">只要地址</option>
+                <option value="markdown">只要内联图</option>
+              </select>
+            </label>
+            <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="检测用代理地址" placeholder="检测代理（可选）如 http://127.0.0.1:7890">
+          </div>
         </div>
 
         <div class="section-head with-top">
