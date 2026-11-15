@@ -29,12 +29,15 @@
   "dependencies": {},
   "keywords": [
     "magpie",
-    "opencode",
-    "opencode-plugin",
+    "magpie-plugin",
     "chatgpt",
-    "codex",
-    "auth",
-    "batch-import"
+    "chatgpt-web",
+    "account-pool",
+    "gpt-image-2",
+    "image-generation",
+    "batch-import",
+    "totp",
+    "macos"
   ],
   "license": "MIT",
   "repository": {

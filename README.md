@@ -1,5 +1,7 @@
 # GPTFree号池（magpie-gptpool）
 
+*Magpie 插件｜把多个 ChatGPT 账号变成自动轮询、自动换号的本地生图号池*
+
 > **本插件是 [`yang0/magpie-gptfree`](https://github.com/yang0/magpie-gptfree) 的分支，已改名为
 > `magpie-gptpool` 独立维护。**
 >
