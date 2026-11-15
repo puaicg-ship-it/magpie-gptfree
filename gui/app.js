@@ -1615,6 +1615,10 @@
     to: "",
     data: null,
     retention: null,
+    cleanup: null,
+    // 列表 / 网格两种视图。只存内存：面板跑在沙箱 iframe 里，没有可用的本地存储，
+    // 而且这属于「一眼偏好」，重开页面回到默认的列表反而更好预期。
+    view: "list",
     selection: new Set(),
     // 名字 → { size, mtime }。跨页累积：确认框要算「共多少 MB」，
     // 而选中的图不一定都在当前这一页。
@@ -1672,6 +1676,7 @@
       const data = await api(imageQuery({ offset: imageState.offset, limit: IMAGE_PAGE_SIZE }));
       imageState.data = data;
       imageState.retention = data.retention || imageState.retention;
+      imageState.cleanup = data.cleanup || imageState.cleanup;
       rememberImages(data.items);
       renderImages();
       $("imageStatus").textContent = "";
@@ -1687,8 +1692,9 @@
     const data = imageState.data;
     renderImageStats(data);
     renderImageChart(data);
+    renderImageCleanup();
     renderImageRetention();
-    renderImageRows(data);
+    renderImageList();
     renderImageBatchBar();
     renderImagePager(data);
     $("imageCount").textContent = data ? String(data.allCount ?? data.total ?? 0) : "—";
@@ -1696,6 +1702,31 @@
     $("imageFilterInfo").textContent = filtering
       ? `筛选后 ${data?.total ?? 0} 张 / 全部 ${data?.allCount ?? 0} 张`
       : `全部 ${data?.allCount ?? 0} 张`;
+  }
+
+  /** 当前视图该画哪一套。选中状态、拖动框选、分页都共用同一份数据，
+   *  所以切视图只是换渲染器，不用重新请求。 */
+  function renderImageList() {
+    const data = imageState.data;
+    const grid = imageState.view === "grid";
+    $("imageGrid").hidden = !grid;
+    document.querySelector(".image-table").hidden = grid;
+    $("imageList").classList.toggle("is-grid", grid);
+    for (const [id, on] of [["imageViewList", !grid], ["imageViewGrid", grid]]) {
+      const button = $(id);
+      if (!button) continue;
+      button.classList.toggle("is-on", on);
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (grid) renderImageGrid(data);
+    else renderImageRows(data);
+  }
+
+  function setImageView(view) {
+    const next = view === "grid" ? "grid" : "list";
+    if (imageState.view === next) return;
+    imageState.view = next;
+    renderImageList();
   }
 
   function imageStatCard(label, value, note, icon) {
@@ -1749,6 +1780,41 @@
     range.textContent = `近 14 天共 ${sum} 张`;
   }
 
+  /** 时段的中文说法：全天 / 02:00–06:00 / 22:00–06:00（跨午夜）。 */
+  function cleanupWindowText(info) {
+    if (!info) return "";
+    if (Number(info.from) === 0 && Number(info.to) === 24) return "全天";
+    const pad = (hour) => String(hour).padStart(2, "0") + ":00";
+    return `${pad(info.from)}–${pad(info.to)}${Number(info.from) > Number(info.to) ? "（跨午夜）" : ""}`;
+  }
+
+  function renderImageCleanup() {
+    const info = imageState.cleanup;
+    const from = $("imageCleanupFrom");
+    const to = $("imageCleanupTo");
+    if (!from || !to || !info) return;
+    if (!from.dataset.built) {
+      // 起始 0–23，结束 1–24：24 表示「到当天结束」，也就是全天。
+      for (let hour = 0; hour < 24; hour++) {
+        const option = document.createElement("option");
+        option.value = String(hour);
+        option.textContent = `${String(hour).padStart(2, "0")}:00`;
+        from.append(option);
+      }
+      for (let hour = 1; hour <= 24; hour++) {
+        const option = document.createElement("option");
+        option.value = String(hour);
+        option.textContent = `${String(hour).padStart(2, "0")}:00`;
+        to.append(option);
+      }
+      from.dataset.built = "1";
+    }
+    from.value = String(info.from);
+    to.value = String(info.to);
+    from.disabled = Boolean(info.locked);
+    to.disabled = Boolean(info.locked);
+  }
+
   function renderImageRetention() {
     const select = $("imageRetention");
     const info = imageState.retention;
@@ -1766,9 +1832,10 @@
     }
     select.value = String(info.days);
     select.disabled = Boolean(info.locked);
+    const window = cleanupWindowText(imageState.cleanup);
     $("imageRetentionHint").textContent = info.locked
       ? `环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS=${info.days} 正在强制覆盖，这里改了不生效。`
-      : `超过 ${info.days} 天的图片会被自动清理（每小时最多跑一次）。改完立刻生效、不用重启；想马上腾地方用下面的「清理早于 N 天」。`;
+      : `超过 ${info.days} 天的图片会被自动清理，只在「${window || "全天"}」内跑（每小时最多一次）。改完立刻生效、不用重启；想马上腾地方用下面的「清理早于 N 天」。`;
   }
 
   function renderImageRows(data) {
@@ -1795,24 +1862,12 @@
       box.setAttribute("aria-label", "选择 " + item.name);
       box.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (event.shiftKey && imageState.lastClicked) selectImageRange(imageState.lastClicked, item.name);
-        else toggleImage(item.name, box.checked);
-        imageState.lastClicked = item.name;
-        renderImageRows(imageState.data);
-        renderImageBatchBar();
+        pickImage(item.name, box.checked, event.shiftKey);
       });
       pick.append(box);
 
       const thumb = el("td", "thumb");
-      const img = document.createElement("img");
-      img.src = imageFileUrl(item.name);
-      // 上千张也只加载看得见的那几屏；缩略图由本地服务透传，不额外缩图。
-      img.loading = "lazy";
-      img.decoding = "async";
-      img.alt = "";
-      img.width = 56;
-      img.height = 56;
-      thumb.append(img);
+      thumb.append(imageThumb(item.name, 56));
 
       const nameCell = el("td", "mono image-name", item.name);
       nameCell.title = item.name;
@@ -1824,6 +1879,74 @@
         el("td", "muted", formatShortTime(new Date(item.mtime).toISOString())),
       );
       body.append(row);
+    }
+  }
+
+  function imageThumb(name, size) {
+    const img = document.createElement("img");
+    img.src = imageFileUrl(name);
+    // 上千张也只加载看得见的那几屏；缩略图由本地服务透传，不额外缩图。
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = "";
+    img.width = size;
+    img.height = size;
+    return img;
+  }
+
+  /** 复选框 / 空格键选中（列表与网格共用）：按住 Shift 时按上次点过的位置连选一段。 */
+  function pickImage(name, checked, shiftKey) {
+    if (shiftKey && imageState.lastClicked) selectImageRange(imageState.lastClicked, name);
+    else toggleImage(name, checked);
+    imageState.lastClicked = name;
+    renderImageList();
+    renderImageBatchBar();
+  }
+
+  function renderImageGrid(data) {
+    const host = $("imageGrid");
+    host.replaceChildren();
+    const items = data?.items || [];
+    if (!items.length) {
+      host.append(el("p", "empty-row", data && data.allCount ? "当前筛选没有图片" : "还没有生成过图片"));
+      return;
+    }
+    for (const item of items) {
+      const selected = imageState.selection.has(item.name);
+      const stamp = formatShortTime(new Date(item.mtime).toISOString());
+      const card = el("article", selected ? "image-card selected" : "image-card");
+      card.dataset.name = item.name;
+      card.tabIndex = 0;
+      card.setAttribute("role", "checkbox");
+      card.setAttribute("aria-checked", selected ? "true" : "false");
+      card.title = `${item.name}\n${formatBytes(item.size)} · ${stamp}`;
+
+      // 用 span 而不是 label 包复选框：点卡片靠 mousedown 选中，点方框走 checkbox 自己的
+      // click，两者不能互相触发，否则一次点击会被算成两次。
+      const pick = el("span", "image-card-pick");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = selected;
+      box.setAttribute("aria-label", "选择 " + item.name);
+      box.addEventListener("click", (event) => {
+        event.stopPropagation();
+        pickImage(item.name, box.checked, event.shiftKey);
+      });
+      pick.append(box);
+
+      const meta = el("div", "image-card-meta");
+      const name = el("span", "image-card-name mono", item.name);
+      name.title = item.name;
+      meta.append(name, el("span", "image-card-sub", `${formatBytes(item.size)} · ${stamp}`));
+
+      card.append(pick, imageThumb(item.name, 180), meta);
+      // 卡片本身就是 checkbox 角色，空格 / 回车也能选。
+      card.addEventListener("keydown", (event) => {
+        if (event.key !== " " && event.key !== "Enter") return;
+        event.preventDefault();
+        pickImage(item.name, !imageState.selection.has(item.name), event.shiftKey);
+      });
+      host.append(card);
     }
   }
 
@@ -1952,7 +2075,7 @@
       rememberImages(result.items);
       imageState.selection.clear();
       for (const item of result.items) imageState.selection.add(item.name);
-      renderImageRows(imageState.data);
+      renderImageList();
       renderImageBatchBar();
       $("imageBatchStatus").textContent = `已选中筛选结果 ${result.items.length} 张`;
     } catch (err) {
@@ -2170,14 +2293,16 @@
     $("imageSelectAll")?.addEventListener("click", selectAllFilteredImages);
     $("imageSelectClear")?.addEventListener("click", () => {
       imageState.selection.clear();
-      renderImageRows(imageState.data);
+      renderImageList();
       renderImageBatchBar();
       $("imageBatchStatus").textContent = "";
     });
+    $("imageViewList")?.addEventListener("click", () => setImageView("list"));
+    $("imageViewGrid")?.addEventListener("click", () => setImageView("grid"));
     $("imagePickAll")?.addEventListener("change", (event) => {
       const items = imageState.data?.items || [];
       for (const item of items) toggleImage(item.name, event.target.checked);
-      renderImageRows(imageState.data);
+      renderImageList();
       renderImageBatchBar();
     });
     $("imageRetention")?.addEventListener("change", async (event) => {
@@ -2192,27 +2317,50 @@
       }
       renderImageRetention();
     });
-    // 拖动框选：按住某一行往下/往上划过一片就连续选中（像文件管理器）。
+    // 清理时段：两个下拉一起读，改哪个都按当前这对值提交。
+    // 起止相同会被服务端拒（空时段），这里先拦一道，避免来回弹提示。
+    for (const id of ["imageCleanupFrom", "imageCleanupTo"]) {
+      $(id)?.addEventListener("change", async () => {
+        const from = Number($("imageCleanupFrom").value);
+        const to = Number($("imageCleanupTo").value);
+        if (from === to) {
+          notice("起止不能是同一个小时", true);
+          renderImageCleanup();
+          return;
+        }
+        try {
+          const result = await api("settings", { imageCleanupWindow: { from, to } });
+          imageState.cleanup = result.imageCleanup || imageState.cleanup;
+          notice(result.message || "清理时段已更新");
+        } catch (err) {
+          notice(err.message, true);
+        }
+        renderImageCleanup();
+        renderImageRetention();   // 提示文案里带着时段
+      });
+    }
+    // 拖动框选：按住某一行（或某张卡片）往下/往上划过一片就连续选中（像文件管理器）。
     // 重绘会换掉鼠标下的节点，所以只在选择真的变了时才重绘，否则会打转。
-    const imageRows = $("imageRows");
-    imageRows?.addEventListener("mousedown", (event) => {
+    // 挂在外层容器上、用 [data-name] 找目标：列表的行和网格的卡片都带这个属性。
+    const imageList = $("imageList");
+    imageList?.addEventListener("mousedown", (event) => {
       if (event.button !== 0) return;
-      const row = event.target.closest("tr.image-row");
+      const row = event.target.closest("[data-name]");
       if (!row || event.target.tagName === "INPUT") return;
       imageState.dragging = true;
       imageState.dragAnchor = row.dataset.name;
       imageState.lastClicked = row.dataset.name;
       toggleImage(row.dataset.name, !imageState.selection.has(row.dataset.name));
-      renderImageRows(imageState.data);
+      renderImageList();
       renderImageBatchBar();
       event.preventDefault();   // 别让拖动变成选中文字
     });
-    imageRows?.addEventListener("mouseover", (event) => {
+    imageList?.addEventListener("mouseover", (event) => {
       if (!imageState.dragging || !imageState.dragAnchor) return;
-      const row = event.target.closest("tr.image-row");
+      const row = event.target.closest("[data-name]");
       if (!row) return;
       if (selectImageRange(imageState.dragAnchor, row.dataset.name)) {
-        renderImageRows(imageState.data);
+        renderImageList();
         renderImageBatchBar();
       }
     });

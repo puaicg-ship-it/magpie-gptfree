@@ -186,6 +186,12 @@
             <div id="imageStatus" class="batch-status tiny" role="status" aria-live="polite"></div>
           </div>
           <div class="pool-actions">
+            <label class="filter-field" title="自动清理只在这个时段内跑，避开生图高峰（清理要先扫一遍目录，上千张时在慢盘上要几百毫秒）。手动「执行清理」「删除选中」不受限制。跨午夜直接选 22 点到 6 点">
+              清理时段
+              <select id="imageCleanupFrom" aria-label="清理时段起始小时"></select>
+              <span aria-hidden="true">–</span>
+              <select id="imageCleanupTo" aria-label="清理时段结束小时"></select>
+            </label>
             <label class="filter-field" title="超过这个天数的图片会被定时清理（每小时最多跑一次）；环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS 存在时这里只读">保留
               <select id="imageRetention" aria-label="图片保留天数"></select>
             </label>
@@ -208,7 +214,13 @@
 
         <div class="section-head with-top">
           <h2>图片列表</h2>
-          <span class="muted tiny">缩略图按需加载 · 按住拖动可连续多选 · Shift 点选选一段</span>
+          <div class="head-side">
+            <span class="muted tiny">缩略图按需加载 · 按住拖动可连续多选 · Shift 点选选一段</span>
+            <div class="view-switch" role="group" aria-label="视图切换">
+              <button id="imageViewList" type="button" class="view-btn is-on" aria-pressed="true">列表</button>
+              <button id="imageViewGrid" type="button" class="view-btn" aria-pressed="false">网格</button>
+            </div>
+          </div>
         </div>
         <div class="pool-filter">
           <label class="filter-field">排序
@@ -248,6 +260,7 @@
             </thead>
             <tbody id="imageRows"></tbody>
           </table>
+          <div id="imageGrid" class="image-grid" hidden></div>
         </div>
         <div class="pager">
           <button id="imagePrev" type="button" class="btn quiet small">上一页</button>

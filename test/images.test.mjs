@@ -7,6 +7,7 @@ import { createGuiService } from "../lib/gui-service.mjs";
 import {
   deleteImages,
   dailyCounts,
+  inCleanupWindow,
   invalidateListCache,
   listImageNames,
   listImages,
@@ -16,12 +17,23 @@ import {
   scanImages,
 } from "../lib/image-store.mjs";
 import {
+  DEFAULT_CLEANUP_WINDOW,
   DEFAULT_IMAGE_RETENTION_DAYS,
+  normalizeCleanupWindow,
+  readImageCleanupWindow,
   readImageRetentionDays,
+  writeImageCleanupWindow,
   writeImageRetentionDays,
 } from "../lib/reply-settings.mjs";
 
 const DAY = 86400000;
+
+/** 今天某个整点（本地时区）的时间戳：清理时段按本地小时判断。 */
+function atHour(hour) {
+  const date = new Date();
+  date.setHours(hour, 30, 0, 0);
+  return date.getTime();
+}
 
 /** 临时目录 + 一批指定时间的假图片。返回 { dir, home, names }。 */
 async function fixture(counts) {
@@ -51,6 +63,7 @@ function cleanup(root) {
   delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
   delete process.env.MAGPIE_GPTFREE_HOME;
   delete process.env.MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS;
+  delete process.env.MAGPIE_GPTFREE_IMAGE_CLEANUP_WINDOW;
   return rm(root, { recursive: true, force: true });
 }
 
@@ -210,6 +223,56 @@ test("pruneOldImages reads the retention setting live and honours the env overri
   }
 });
 
+test("清理时段：只在窗口内自动清理，跨午夜算得对，手动 purge 不受限", async () => {
+  const fx = await fixture([{ ageDays: 0, size: 10 }, { ageDays: 20, size: 10 }]);
+  try {
+    assert.deepEqual(await readImageCleanupWindow(), { ...DEFAULT_CLEANUP_WINDOW, source: "default" });
+
+    // 归一化：字符串、对象、跨午夜都认；空时段和越界一律判非法
+    assert.deepEqual(normalizeCleanupWindow("2-6"), { from: 2, to: 6 });
+    assert.deepEqual(normalizeCleanupWindow("22-6"), { from: 22, to: 6 });
+    assert.deepEqual(normalizeCleanupWindow({ from: 0, to: 24 }), { from: 0, to: 24 });
+    for (const bad of ["25-3", "6-6", "", "abc", "2", { from: 3, to: 3 }, { from: -1, to: 5 }]) {
+      assert.equal(normalizeCleanupWindow(bad), null, "应判为非法：" + JSON.stringify(bad));
+    }
+
+    // 跨午夜：22–6 包含 23 点和 3 点，不包含 12 点；右端开区间
+    assert.equal(inCleanupWindow(atHour(23), { from: 22, to: 6 }), true);
+    assert.equal(inCleanupWindow(atHour(3), { from: 22, to: 6 }), true);
+    assert.equal(inCleanupWindow(atHour(12), { from: 22, to: 6 }), false);
+    assert.equal(inCleanupWindow(atHour(2), { from: 2, to: 6 }), true);
+    assert.equal(inCleanupWindow(atHour(6), { from: 2, to: 6 }), false);
+    assert.equal(inCleanupWindow(atHour(12), { from: 0, to: 24 }), true);   // 全天
+
+    await writeImageCleanupWindow({ from: 2, to: 6 });
+    assert.deepEqual(await readImageCleanupWindow(), { from: 2, to: 6, source: "settings" });
+    await assert.rejects(() => writeImageCleanupWindow({ from: 6, to: 6 }), (err) => err.status === 400);
+
+    // 时段外：直接跳过，一张都不删（+1 天避开上一轮的一小时节流）
+    const outside = await pruneOldImages({ nowMs: atHour(12) + DAY });
+    assert.equal(outside.skipped, true);
+    assert.equal(outside.reason, "window");
+    assert.equal((await scanImages({ fresh: true })).length, 2);
+
+    // 时段内：默认 7 天，20 天前那张走人
+    const inside = await pruneOldImages({ nowMs: atHour(3) + 2 * DAY });
+    assert.equal(inside.skipped, false);
+    assert.equal(inside.deleted, 1);
+    assert.equal((await scanImages({ fresh: true })).length, 1);
+
+    // force 是手动补跑用的：连时段一起绕过，白天也能清
+    await writeImageRetentionDays(1);   // 让 0 天前那张也过期（1 天前 > 0 天）
+    const forced = await pruneOldImages({ force: true, nowMs: atHour(12) + 3 * DAY });
+    assert.equal(forced.deleted, 1);
+
+    // 环境变量优先于面板设置
+    process.env.MAGPIE_GPTFREE_IMAGE_CLEANUP_WINDOW = "0-24";
+    assert.deepEqual(await readImageCleanupWindow(), { from: 0, to: 24, source: "env" });
+  } finally {
+    await cleanup(fx.root);
+  }
+});
+
 test("GUI image API lists, serves thumbnails, deletes and purges", async () => {
   const fx = await fixture([
     { ageDays: 0, size: 12 },
@@ -241,6 +304,8 @@ test("GUI image API lists, serves thumbnails, deletes and purges", async () => {
     assert.equal(list.json.totalBytes, 102);
     assert.equal(list.json.daily.length, 14);
     assert.deepEqual(list.json.retention, { days: 7, source: "default", locked: false });
+    // 自动清理的时段：默认全天，手动 purge 不看它
+    assert.deepEqual(list.json.cleanup, { from: 0, to: 24, source: "default", locked: false });
 
     const namesOnly = await get("images?namesOnly=1");
     assert.equal(namesOnly.json.items.length, 3);
@@ -288,6 +353,19 @@ test("GUI image API lists, serves thumbnails, deletes and purges", async () => {
     // 设置文件和 vault 一样落在 poolDir 里。
     const stored = JSON.parse(await readFile(join(fx.home, "settings.json"), "utf8"));
     assert.equal(stored.imageRetentionDays, 14);
+
+    // 清理时段也能从这里改：写进去、列表接口立刻反映、非法值 400。
+    const win = await post("settings", { imageCleanupWindow: { from: 22, to: 6 } });
+    assert.equal(win.status, 200);
+    assert.deepEqual(win.json.imageCleanup, { from: 22, to: 6, source: "settings", locked: false });
+    assert.deepEqual((await get("images?limit=1")).json.cleanup, {
+      from: 22, to: 6, source: "settings", locked: false,
+    });
+    assert.equal((await post("settings", { imageCleanupWindow: { from: 5, to: 5 } })).status, 400);
+    assert.equal((await post("settings", { imageCleanupWindow: "25-3" })).status, 400);
+    // 手动清理不受时段限制：现在是白天也照样删
+    const manual = await post("images/purge", { olderThanDays: 1 });
+    assert.equal(manual.status, 200);
   } finally {
     await service.close();
     await cleanup(fx.root);

@@ -344,6 +344,9 @@ footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 1
 /* ---------- 图片页 ---------- */
 /* 表头 38 + 8 行 × 68（缩略图 56 + 上下内边距 12），正好八行不出半行 */
 #imageList { max-height: 582px }
+/* 网格不设 max-height：卡片高度随宽度变，硬卡一个值必然切出半行缩略图，
+   看起来像图坏了。20 张一页撑开了也只是一屏多一点，交给页面滚动更干净。 */
+#imageList.is-grid { max-height: none }
 .image-table { min-width: 720px }
 .image-table .col-thumb { width: 76px }
 .image-table .col-img-size { width: 92px }
@@ -371,3 +374,48 @@ footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 1
 #imageStats { grid-template-columns: repeat(4, minmax(0, 1fr)) }
 @media (max-width: 900px) { #imageStats { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
 @media (max-width: 560px) { #imageStats { grid-template-columns: 1fr } }
+
+/* 视图切换（列表 / 网格） */
+.head-side { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end }
+.view-switch { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-soft) }
+.view-btn {
+  min-height: 26px; padding: 3px 11px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.view-btn:hover { color: var(--text) }
+.view-btn.is-on { background: var(--card); color: var(--accent); box-shadow: 0 1px 2px rgba(8, 25, 20, .12) }
+.view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+
+/* 网格视图：同一份数据换一种排版，选中 / 拖动 / 分页都复用列表那套状态 */
+.image-grid {
+  display: grid; gap: 12px; padding: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+}
+.image-grid .empty-row { grid-column: 1 / -1; margin: 0; padding: 26px 10px; text-align: center; color: var(--muted) }
+.image-card {
+  position: relative; display: flex; flex-direction: column; gap: 7px; min-width: 0;
+  padding: 8px; border: 1px solid var(--line); border-radius: 11px; background: var(--card);
+  cursor: pointer; user-select: none;
+}
+.image-card:hover { background: var(--row-hover); border-color: var(--accent-line) }
+/* 选中态要能一眼看出来：卡片底色本来就浅，只换背景在深色缩略图旁边几乎看不出 */
+.image-card.selected { background: var(--accent-weak); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) }
+.image-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px }
+.image-card img {
+  display: block; width: 100%; height: auto; aspect-ratio: 1 / 1;
+  object-fit: cover; border-radius: 8px; background: var(--bg-soft);
+}
+/* 复选框做成一枚浮在缩略图上的小徽章：不挡图，也不吃卡片点击 */
+.image-card-pick {
+  position: absolute; top: 13px; left: 13px; z-index: 1;
+  display: inline-flex; padding: 2px 3px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--card);
+}
+.image-card-pick input { margin: 0; cursor: pointer }
+.image-card-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0 }
+.image-card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--muted) }
+/* 文件名比卡片宽，允许折两行：截成 mwhqawerr-00000000… 之后认不出是哪张 */
+.image-card-name {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  font-size: 11px; line-height: 1.45; word-break: break-all; overflow: hidden;
+}
