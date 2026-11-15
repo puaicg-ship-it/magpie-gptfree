@@ -340,3 +340,34 @@ footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 1
   .batch-status .spin { animation: none; border-top-color: var(--accent) }
   .dropzone, #progressFill { transition: none }
 }
+
+/* ---------- 图片页 ---------- */
+/* 表头 38 + 8 行 × 68（缩略图 56 + 上下内边距 12），正好八行不出半行 */
+#imageList { max-height: 582px }
+.image-table { min-width: 720px }
+.image-table .col-thumb { width: 76px }
+.image-table .col-img-size { width: 92px }
+.image-table .col-img-time { width: 116px }
+.image-table td.thumb { padding: 6px 10px }
+.image-table td.thumb img {
+  display: block; width: 56px; height: 56px; object-fit: cover;
+  border-radius: 8px; border: 1px solid var(--line); background: var(--bg-soft);
+}
+.image-table tr.image-row { cursor: pointer; user-select: none }
+.image-table tr.image-row:hover td { background: var(--row-hover) }
+.image-table tr.image-row.selected td { background: var(--accent-weak) }
+.image-table tr.image-row td { border-bottom: 1px solid var(--line) }
+.image-name { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.image-table tr.empty-row td { text-align: center; color: var(--muted); padding: 26px 10px }
+.date-input, .num-input {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-soft); color: var(--text); font-size: 12px; min-height: 32px;
+}
+.num-input { width: 64px; text-align: right; font-variant-numeric: tabular-nums }
+.date-input:focus, .num-input:focus { border-color: var(--accent); outline: none }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin: 12px 0 4px }
+.pager .btn:disabled { opacity: .45; cursor: default }
+/* 图片页只有 4 张卡：单独给个 4 列网格，别按账号页的 3 列折成 3+1 */
+#imageStats { grid-template-columns: repeat(4, minmax(0, 1fr)) }
+@media (max-width: 900px) { #imageStats { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+@media (max-width: 560px) { #imageStats { grid-template-columns: 1fr } }

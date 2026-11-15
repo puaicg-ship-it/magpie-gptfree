@@ -15,6 +15,16 @@ master.key
 *.release-token
 *.token
 
+# 维护者本机工具：发版 / 部署 / 上游追踪脚本不进公开仓库。
+# 它们会碰到主机名、跳板别名、远程路径，公开一次就永久留在 git 历史里。
+# 仓库里只留 scripts/demo-preview.mjs（造假数据截图用，不含任何内网信息）。
+scripts/release.sh
+scripts/update-server.sh
+scripts/upstream-status.sh
+scripts/.release-token
+.magpie-gptpool-release.env
+*.release.env
+
 # Runtime and tests
 node_modules/
 playwright-report/

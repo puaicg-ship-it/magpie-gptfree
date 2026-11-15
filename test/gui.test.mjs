@@ -715,8 +715,8 @@ test("reply mode is editable from the panel and says so when an env var override
     // 面板改一次：写文件、立即生效。
     const saved = await h.api("settings", { imageReply: "url" });
     assert.equal(saved.status, 200);
-    assert.equal(saved.json.mode, "url");
-    assert.equal(saved.json.source, "settings");
+    assert.equal(saved.json.imageReply.mode, "url");
+    assert.equal(saved.json.imageReply.source, "settings");
     assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).imageReply, "url");
     assert.equal((await h.api("stats")).json.imageReply.mode, "url");
 
@@ -732,8 +732,8 @@ test("reply mode is editable from the panel and says so when an env var override
     assert.equal(locked.json.imageReply.mode, "markdown");
     const attempt = await h.api("settings", { imageReply: "both" });
     assert.equal(attempt.status, 200);
-    assert.equal(attempt.json.mode, "markdown");
-    assert.equal(attempt.json.locked, true);
+    assert.equal(attempt.json.imageReply.mode, "markdown");
+    assert.equal(attempt.json.imageReply.locked, true);
     assert.match(attempt.json.message, /环境变量/);
   } finally {
     if (h) await h.close();

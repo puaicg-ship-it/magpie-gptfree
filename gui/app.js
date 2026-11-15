@@ -1602,6 +1602,364 @@
   }
 
   // ---------- tab ----------
+  // ---------- 图片页 ----------
+  const IMAGE_PAGE_SIZE = 20;
+  // 服务端单次删除上限（image-store 的 MAX_DELETE_PER_REQUEST），多了要分批。
+  const IMAGE_DELETE_CHUNK = 500;
+  // 保留天数的候选档位；当前值不在里面时补进去（环境变量可能设成 37）。
+  const RETENTION_CHOICES = [1, 3, 7, 14, 30, 60, 90];
+  const imageState = {
+    offset: 0,
+    sort: "time",
+    from: "",
+    to: "",
+    data: null,
+    retention: null,
+    selection: new Set(),
+    // 名字 → { size, mtime }。跨页累积：确认框要算「共多少 MB」，
+    // 而选中的图不一定都在当前这一页。
+    index: new Map(),
+    loading: false,
+    dragging: false,
+    dragAnchor: "",
+    lastClicked: "",
+  };
+
+  function imageFileUrl(name) {
+    return "api/images/file?name=" + encodeURIComponent(name);
+  }
+  function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+    return (n / 1073741824).toFixed(2) + " GB";
+  }
+  function imageQuery(extra = {}) {
+    const params = new URLSearchParams();
+    const sort = extra.sort ?? imageState.sort;
+    if (sort !== "time") params.set("sort", sort);
+    // 注意用 ?? 而不是 ||：清理预览要显式传 from="" 绕开当前筛选。
+    const from = extra.from ?? imageState.from;
+    const to = extra.to ?? imageState.to;
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    if (extra.namesOnly) params.set("namesOnly", "1");
+    if (extra.offset !== undefined) params.set("offset", String(extra.offset));
+    if (extra.limit !== undefined) params.set("limit", String(extra.limit));
+    const qs = params.toString();
+    return "images" + (qs ? "?" + qs : "");
+  }
+  function rememberImages(items) {
+    for (const item of items || []) {
+      imageState.index.set(item.name, { size: item.size, mtime: item.mtime });
+    }
+  }
+  function selectedBytes() {
+    let sum = 0;
+    for (const name of imageState.selection) sum += imageState.index.get(name)?.size || 0;
+    return sum;
+  }
+
+  async function loadImages({ reset = false } = {}) {
+    if (imageState.loading) return;
+    imageState.loading = true;
+    if (reset) {
+      imageState.offset = 0;
+      imageState.selection.clear();
+    }
+    try {
+      const data = await api(imageQuery({ offset: imageState.offset, limit: IMAGE_PAGE_SIZE }));
+      imageState.data = data;
+      imageState.retention = data.retention || imageState.retention;
+      rememberImages(data.items);
+      renderImages();
+      $("imageStatus").textContent = "";
+    } catch (err) {
+      $("imageStatus").textContent = "图片列表读取失败：" + err.message;
+      notice(err.message, true);
+    } finally {
+      imageState.loading = false;
+    }
+  }
+
+  function renderImages() {
+    const data = imageState.data;
+    renderImageStats(data);
+    renderImageChart(data);
+    renderImageRetention();
+    renderImageRows(data);
+    renderImageBatchBar();
+    renderImagePager(data);
+    $("imageCount").textContent = data ? String(data.allCount ?? data.total ?? 0) : "—";
+    const filtering = Boolean(imageState.from || imageState.to);
+    $("imageFilterInfo").textContent = filtering
+      ? `筛选后 ${data?.total ?? 0} 张 / 全部 ${data?.allCount ?? 0} 张`
+      : `全部 ${data?.allCount ?? 0} 张`;
+  }
+
+  function imageStatCard(label, value, note, icon) {
+    const card = el("article", "stat-card");
+    const head = el("div", "stat-heading");
+    head.append(el("span", "", label), el("span", "stat-icon", icon));
+    card.append(head, el("strong", "", value), el("span", "stat-note", note));
+    return card;
+  }
+
+  function renderImageStats(data) {
+    const host = $("imageStats");
+    host.replaceChildren();
+    const stamp = (ms) => (ms ? formatShortTime(new Date(ms).toISOString()) : "—");
+    host.append(
+      imageStatCard("总张数", data ? String(data.allCount ?? 0) : "—", "图片目录里一共几张", "▦"),
+      imageStatCard("总占用", data ? formatBytes(data.totalBytes) : "—", "磁盘占用（全部图片）", "◍"),
+      imageStatCard("最早一张", stamp(data?.earliest), "保留期到了会被自动清理", "↤"),
+      imageStatCard("最晚一张", stamp(data?.latest), "最近一次生成时间", "↦"),
+    );
+  }
+
+  function renderImageChart(data) {
+    const host = $("imageChart");
+    const range = $("imageRange");
+    host.replaceChildren();
+    const daily = Array.isArray(data?.daily) ? data.daily : [];
+    if (!daily.length) {
+      host.append(el("div", "insight-empty", "还没有图片"));
+      range.textContent = "";
+      return;
+    }
+    const max = Math.max(1, ...daily.map((day) => day.count));
+    for (const day of daily) {
+      const wrap = el("div", "history-day");
+      const bars = el("div", "history-bars");
+      if (day.count > 0) {
+        const values = el("div", "history-total");
+        values.append(el("b", "ok", formatCount(day.count)));
+        values.title = `${day.date} 生成 ${day.count} 张`;
+        bars.append(values);
+      }
+      const bar = el("div", "history-bar ok");
+      bar.style.height = Math.round((day.count / max) * 100) + "%";
+      bar.title = `${day.date} 生成 ${day.count} 张`;
+      bars.append(bar);
+      wrap.append(bars, el("span", "", day.date.slice(5)));
+      host.append(wrap);
+    }
+    const sum = daily.reduce((acc, day) => acc + day.count, 0);
+    range.textContent = `近 14 天共 ${sum} 张`;
+  }
+
+  function renderImageRetention() {
+    const select = $("imageRetention");
+    const info = imageState.retention;
+    if (!select || !info) return;
+    const choices = [...new Set([...RETENTION_CHOICES, Number(info.days)])].sort((a, b) => a - b);
+    const key = choices.join(",");
+    if (select.dataset.built !== key) {
+      select.replaceChildren(...choices.map((days) => {
+        const option = document.createElement("option");
+        option.value = String(days);
+        option.textContent = days + " 天";
+        return option;
+      }));
+      select.dataset.built = key;
+    }
+    select.value = String(info.days);
+    select.disabled = Boolean(info.locked);
+    $("imageRetentionHint").textContent = info.locked
+      ? `环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS=${info.days} 正在强制覆盖，这里改了不生效。`
+      : `超过 ${info.days} 天的图片会被自动清理（每小时最多跑一次）。改完立刻生效、不用重启；想马上腾地方用下面的「清理早于 N 天」。`;
+  }
+
+  function renderImageRows(data) {
+    const body = $("imageRows");
+    body.replaceChildren();
+    const items = data?.items || [];
+    if (!items.length) {
+      const row = el("tr", "empty-row");
+      const cell = el("td", "", data && data.allCount ? "当前筛选没有图片" : "还没有生成过图片");
+      cell.colSpan = 5;
+      row.append(cell);
+      body.append(row);
+      return;
+    }
+    for (const item of items) {
+      const row = el("tr", "image-row");
+      row.dataset.name = item.name;
+      if (imageState.selection.has(item.name)) row.classList.add("selected");
+
+      const pick = el("td", "pick");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = imageState.selection.has(item.name);
+      box.setAttribute("aria-label", "选择 " + item.name);
+      box.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (event.shiftKey && imageState.lastClicked) selectImageRange(imageState.lastClicked, item.name);
+        else toggleImage(item.name, box.checked);
+        imageState.lastClicked = item.name;
+        renderImageRows(imageState.data);
+        renderImageBatchBar();
+      });
+      pick.append(box);
+
+      const thumb = el("td", "thumb");
+      const img = document.createElement("img");
+      img.src = imageFileUrl(item.name);
+      // 上千张也只加载看得见的那几屏；缩略图由本地服务透传，不额外缩图。
+      img.loading = "lazy";
+      img.decoding = "async";
+      img.alt = "";
+      img.width = 56;
+      img.height = 56;
+      thumb.append(img);
+
+      const nameCell = el("td", "mono image-name", item.name);
+      nameCell.title = item.name;
+      row.append(
+        pick,
+        thumb,
+        nameCell,
+        el("td", "", formatBytes(item.size)),
+        el("td", "muted", formatShortTime(new Date(item.mtime).toISOString())),
+      );
+      body.append(row);
+    }
+  }
+
+  function renderImageBatchBar() {
+    const count = imageState.selection.size;
+    $("imageBatchCount").textContent = `已选 ${count} 张`;
+    $("imageBatchCount").title = count ? `共 ${formatBytes(selectedBytes())}` : "";
+    $("imageDelete").disabled = count === 0;
+  }
+
+  function renderImagePager(data) {
+    const total = data?.total || 0;
+    const page = Math.floor(imageState.offset / IMAGE_PAGE_SIZE) + 1;
+    const pages = Math.max(1, Math.ceil(total / IMAGE_PAGE_SIZE));
+    $("imagePageInfo").textContent = total
+      ? `第 ${page} / ${pages} 页 · 本页 ${(data.items || []).length} 张`
+      : "没有图片";
+    $("imagePrev").disabled = imageState.offset <= 0;
+    $("imageNext").disabled = imageState.offset + IMAGE_PAGE_SIZE >= total;
+  }
+
+  function toggleImage(name, checked) {
+    if (checked) imageState.selection.add(name);
+    else imageState.selection.delete(name);
+  }
+
+  /** 选中 anchor→current 这一段。返回是否真的变了 —— 变了才重绘，
+   *  否则「重绘 → 鼠标下换了个新节点 → 又触发 mouseover」会死循环。 */
+  function selectImageRange(anchor, current) {
+    const items = imageState.data?.items || [];
+    const a = items.findIndex((item) => item.name === anchor);
+    const b = items.findIndex((item) => item.name === current);
+    if (a < 0 || b < 0) return false;
+    let changed = false;
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) {
+      const name = items[i].name;
+      if (!imageState.selection.has(name)) {
+        imageState.selection.add(name);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  async function deleteSelectedImages() {
+    const names = [...imageState.selection];
+    if (!names.length) return;
+    const sure = await confirmAction({
+      title: "删除图片",
+      message: `将删除 ${names.length} 张图片，共 ${formatBytes(selectedBytes())}。` +
+        "已经发出去的链接会立即 404，无法恢复。",
+      confirmText: "确认删除",
+    });
+    if (!sure) return;
+    await runImageDelete(names);
+  }
+
+  async function runImageDelete(names) {
+    const status = $("imageBatchStatus");
+    status.textContent = `正在删除 ${names.length} 张…`;
+    const failed = [];
+    let deleted = 0;
+    for (let i = 0; i < names.length; i += IMAGE_DELETE_CHUNK) {
+      const chunk = names.slice(i, i + IMAGE_DELETE_CHUNK);
+      try {
+        const result = await api("images/delete", { names: chunk });
+        deleted += result.deleted || 0;
+        failed.push(...(result.failed || []));
+      } catch (err) {
+        failed.push({ name: `第 ${i + 1}–${i + chunk.length} 张`, reason: err.message });
+      }
+    }
+    // 删成功的从选择里拿掉；失败的留着，用户可以直接重试。
+    const failedNames = new Set(failed.map((item) => item.name));
+    for (const name of names) if (!failedNames.has(name)) imageState.selection.delete(name);
+    status.textContent = failed.length
+      ? `成功 ${deleted} 张，失败 ${failed.length} 张（${failed.slice(0, 3).map((f) => f.reason).join("；")}${failed.length > 3 ? "…" : ""}）`
+      : `已删除 ${deleted} 张`;
+    await loadImages();
+  }
+
+  async function purgeOldImages() {
+    const days = Number($("imagePurgeDays").value);
+    if (!Number.isFinite(days) || days < 1) {
+      notice("清理天数要填 1 以上", true);
+      return;
+    }
+    const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+    let preview;
+    try {
+      // 先问服务端「早于 N 天的一共有多少」，确认框里才能写准确数字和总大小。
+      preview = await api(imageQuery({ namesOnly: true, from: "", to: cutoff }));
+    } catch (err) {
+      notice(err.message, true);
+      return;
+    }
+    if (!preview.total) {
+      notice(`没有早于 ${days} 天的图片`);
+      return;
+    }
+    const sure = await confirmAction({
+      title: "清理旧图片",
+      message: `将删除 ${preview.total} 张早于 ${days} 天的图片，共 ${formatBytes(preview.bytes)}。` +
+        "已经发出去的链接会立即 404，无法恢复。这次清理不改全局保留天数。",
+      confirmText: "确认删除",
+    });
+    if (!sure) return;
+    const status = $("imageBatchStatus");
+    status.textContent = "正在清理…";
+    try {
+      const result = await api("images/purge", { olderThanDays: days });
+      const failed = result.failed || [];
+      status.textContent = failed.length
+        ? `清理了 ${result.deleted} 张，失败 ${failed.length} 张`
+        : `已清理 ${result.deleted} 张早于 ${days} 天的图片`;
+      await loadImages({ reset: true });
+    } catch (err) {
+      status.textContent = "";
+      notice(err.message, true);
+    }
+  }
+
+  async function selectAllFilteredImages() {
+    try {
+      const result = await api(imageQuery({ namesOnly: true }));
+      rememberImages(result.items);
+      imageState.selection.clear();
+      for (const item of result.items) imageState.selection.add(item.name);
+      renderImageRows(imageState.data);
+      renderImageBatchBar();
+      $("imageBatchStatus").textContent = `已选中筛选结果 ${result.items.length} 张`;
+    } catch (err) {
+      notice(err.message, true);
+    }
+  }
+
   function tab(next) {
     activeTab = next;
     document.querySelectorAll(".tab").forEach((button) => {
@@ -1611,6 +1969,9 @@
     });
     hidden("overviewPanel", next !== "stats");
     hidden("importPanel", next !== "import");
+    hidden("imagesPanel", next !== "images");
+    // 图片页的数据量跟账号页无关，切过去才拉（服务端有 30 秒目录缓存，重复切不贵）。
+    if (next === "images") loadImages();
   }
 
   function setup() {
@@ -1773,6 +2134,89 @@
         notice(err.message, true);
       }
     });
+
+    // ---------- 图片页 ----------
+    $("imagesRefresh")?.addEventListener("click", () => {
+      $("imageStatus").textContent = "正在刷新…";
+      loadImages();
+    });
+    $("imageSort")?.addEventListener("change", (event) => {
+      imageState.sort = event.target.value === "size" ? "size" : "time";
+      loadImages({ reset: true });
+    });
+    for (const id of ["imageFrom", "imageTo"]) {
+      $(id)?.addEventListener("change", (event) => {
+        imageState[id === "imageFrom" ? "from" : "to"] = event.target.value || "";
+        loadImages({ reset: true });
+      });
+    }
+    $("imageFilterClear")?.addEventListener("click", () => {
+      imageState.from = "";
+      imageState.to = "";
+      $("imageFrom").value = "";
+      $("imageTo").value = "";
+      loadImages({ reset: true });
+    });
+    $("imagePrev")?.addEventListener("click", () => {
+      imageState.offset = Math.max(0, imageState.offset - IMAGE_PAGE_SIZE);
+      loadImages();
+    });
+    $("imageNext")?.addEventListener("click", () => {
+      imageState.offset += IMAGE_PAGE_SIZE;
+      loadImages();
+    });
+    $("imageDelete")?.addEventListener("click", deleteSelectedImages);
+    $("imagePurge")?.addEventListener("click", purgeOldImages);
+    $("imageSelectAll")?.addEventListener("click", selectAllFilteredImages);
+    $("imageSelectClear")?.addEventListener("click", () => {
+      imageState.selection.clear();
+      renderImageRows(imageState.data);
+      renderImageBatchBar();
+      $("imageBatchStatus").textContent = "";
+    });
+    $("imagePickAll")?.addEventListener("change", (event) => {
+      const items = imageState.data?.items || [];
+      for (const item of items) toggleImage(item.name, event.target.checked);
+      renderImageRows(imageState.data);
+      renderImageBatchBar();
+    });
+    $("imageRetention")?.addEventListener("change", async (event) => {
+      const select = event.target;
+      select.disabled = true;
+      try {
+        const result = await api("settings", { imageRetentionDays: Number(select.value) });
+        imageState.retention = result.imageRetention || imageState.retention;
+        notice(result.message || "保留天数已更新");
+      } catch (err) {
+        notice(err.message, true);
+      }
+      renderImageRetention();
+    });
+    // 拖动框选：按住某一行往下/往上划过一片就连续选中（像文件管理器）。
+    // 重绘会换掉鼠标下的节点，所以只在选择真的变了时才重绘，否则会打转。
+    const imageRows = $("imageRows");
+    imageRows?.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      const row = event.target.closest("tr.image-row");
+      if (!row || event.target.tagName === "INPUT") return;
+      imageState.dragging = true;
+      imageState.dragAnchor = row.dataset.name;
+      imageState.lastClicked = row.dataset.name;
+      toggleImage(row.dataset.name, !imageState.selection.has(row.dataset.name));
+      renderImageRows(imageState.data);
+      renderImageBatchBar();
+      event.preventDefault();   // 别让拖动变成选中文字
+    });
+    imageRows?.addEventListener("mouseover", (event) => {
+      if (!imageState.dragging || !imageState.dragAnchor) return;
+      const row = event.target.closest("tr.image-row");
+      if (!row) return;
+      if (selectImageRange(imageState.dragAnchor, row.dataset.name)) {
+        renderImageRows(imageState.data);
+        renderImageBatchBar();
+      }
+    });
+    document.addEventListener("mouseup", () => { imageState.dragging = false; });
 
     window.addEventListener("focus", () => { loadPendingDraft(); });
     document.addEventListener("visibilitychange", () => {

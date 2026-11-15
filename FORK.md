@@ -14,7 +14,7 @@
 
 - `main` = 上游 0.6.6，只用来跟上游对比。
 - `patch/chat-image-bridge` = **我们的代码，仓库默认分支**。Magpie 里装这个仓，默认拿到的就是它。
-- 我们自己的版本号在 `package.json` 里往上走（当前 `0.8.7`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
+- 我们自己的版本号在 `package.json` 里往上走（当前 `0.8.11`），和上游版本号不是一套；Magpie 比的是 commit，不是版本号。
 
 ## 显示名只有一个来源
 
@@ -31,15 +31,17 @@
 | 文件 | 改动 |
 | --- | --- |
 | `lib/chat-image-bridge.mjs` | **新增**。把打到 `/v1/chat/completions` 的图片模型桥到 `/images/generations` 或 `/images/edits`，PNG 落盘到 `/config/images`，回一条 `chat.completion`，正文默认是**内联图 + 紧跟一行裸地址**（`n>1` 时每张图一组、组间空一行，流式与非流式一致）。为什么两样都给：客户端「复制」复制的是正文文本，只给 markdown 的话粘到微信/文档里是一行源码；而图片是框架自己画的、没有「拷贝图像」，位图进不了剪贴板 —— 服务端只有文本这一个杠杆，所以图负责渲染、地址负责复制转发。形态在面板「回复格式」里选（`lib/reply-settings.mjs`，存 `settings.json`，重启后还在），环境变量 `MAGPIE_GPTFREE_IMAGE_REPLY` 优先、用来强制覆盖（此时面板下拉置灰并说明原因）。**0.8.10 起 `n>1` 真的出多张**：上游单次只出一张（原生接口的 `n` 是 magpie 网关在外面循环的），所以桥接层并发打 n 次、每次 `n:1`，并发上限 2（对齐 `auth.maxConcurrency`），顺序按提交顺序拼；**部分成功也返回**，只在全部失败时才报错。超时类错误映射成 400 + `code`，避免网关把一次失败重试成两次。 |
-| `lib/gui-service.mjs` | 面板本地服务（127.0.0.1:37990）：页面 + 会话能力（CSRF，落盘 24h，跨宿主重启不失效）+ 全部 `/api/*`。**0.8.10 起端口冲突会有限次退避重试**（500/1000/2000/3000ms，约 6.5 秒）—— 从面板热更新插件时新旧 host 的端口会短暂重叠，原来只 bind 一次、失败就永久打不开，只能 `docker restart` 救；只有 `EADDRINUSE` 才重试，重试次数写进错误文案由 `index.mjs` 的 warn 带出去。另新增 `POST /api/settings`（回复格式）。 |
+| `lib/gui-service.mjs` | 面板本地服务（127.0.0.1:37990）：页面 + 会话能力（CSRF，落盘 24h，跨宿主重启不失效）+ 全部 `/api/*`。**0.8.10 起端口冲突会有限次退避重试**（500/1000/2000/3000ms，约 6.5 秒）—— 从面板热更新插件时新旧 host 的端口会短暂重叠，原来只 bind 一次、失败就永久打不开，只能 `docker restart` 救；只有 `EADDRINUSE` 才重试，重试次数写进错误文案由 `index.mjs` 的 warn 带出去。**0.8.11 起新增图片管理接口**：`/api/images`（分页/排序/日期筛选/统计/`namesOnly`）、`/api/images/delete`（单次上限 500）、`/api/images/purge`（早于 N 天）、`/api/images/file`（缩略图透传）。缩略图那条**不校验会话**：`<img>` 发不出自定义请求头，而端口只监听 127.0.0.1，同一批图本来就由 nginx 公开。 |
+| `lib/image-store.mjs` | **0.8.11 新增**。图片目录的唯一入口：文件名白名单 `^[A-Za-z0-9._-]+\.(png\|jpg\|jpeg\|webp\|gif)$` + `resolve()` 后前缀校验（挡 `../`）、`listImages` 分页与统计、`dailyCounts` 按**本地日期**分桶（用 `getFullYear/getMonth/getDate`，不能用 `toISOString()`，那是 UTC）、`deleteImages` 逐条容错（ENOENT 算成功）、`purgeOlderThanDays`、`pruneOldImages`（每次现读保留天数）。目录扫描有 30 秒缓存，删除/落盘后主动失效。 |
+| `lib/reply-settings.mjs` | **0.8.9 新增，0.8.11 扩展**。回复形态（`imageReply.mode`）与图片保留天数（`imageRetentionDays`，1–90）读写 `~/.magpie-gptfree/settings.json`；原子写（tmp + rename，0600）并保留其它键。**环境变量优先于面板设置**，返回值带 `source: env\|settings\|default`，env 压着时面板置灰只读。 |
 | `lib/codex-pool.mjs` | 选号改成**额度加权轮转**（nginx smooth WRR，持久化 credit）+ **熔断**（连续失败指数退避 10min→1h）。判死号排到兜底队列最后。图片路径把失败原因分成"请求的错"和"账号的错"。额度打到 0、上游重置时间过后**自动后台复检**（禁用重新登录，绝不触发 MFA）。 |
 | `lib/pool-stats.mjs` | 健康账本：`consecutiveFails` / `cooldownUntil` / `failSince` / `lastSuccessAt` / `authFails` / `deadAt`。四条判死规则：`auth`（授权连续失败 2 次 —— 生图调用里的 `unauthorized` 和额度检测里的 `mfa_verify_failed_403` 都算，超时/连不上不算）、`never`（一次没成过但失败 ≥15 次）、`stale`（72h 没成功）、`marked`。额度检测成功可复活 `auth` 类死号并清零连续失败。按天账本保留期 14 → **400 天**（约 13 个月，够按年看，也不至于每次记账都重写一个大文件），`history` 改为返回保留期内的全部天，由前端聚合成周/月/年。 |
 | `lib/chatgpt-web-image.mjs` | 单次 35s / 整单 55s 硬预算（`AbortController` + `Promise.race`，重新登录也算在预算里）；额度耗尽的 400 换号而不是整个请求失败；解析"上限将在 21小时 后重置"得到 `retryAfter`。 |
 | `lib/chatgpt-web-text.mjs` | 单次尝试压到 60s 且不超过剩余预算（worker 默认 180s 比整单 120s 还长）；文本选号排除「重新登录都过不去」的号，但**不**套用图片的熔断/额度状态，并用自己的轮转账本，不干扰图片按额度加权。 |
 | `lib/credentials.mjs` | 账号行分隔符从"3 个以上连字符"放宽到 `----` / `---` / `--` 三种，同一文件可混写（邮箱和 Base32 密钥都不含 `-`，所以 `--` 在前三列不会切错）。五字段行仍要求 `----`：JWT 签名里本身可能出现 `--`，用 `--` 切会切坏 token，这种行直接报错而不是悄悄导错。 |
 | `gui/app.js` | 失效徽章区分三种失效原因并给出对应的复活提示；趋势图把生图与文本分开计数，并支持 **按日 / 按周 / 按月 / 按年** 切换（周从周一起算，窗口内没有数据的天也画成空柱），**每根柱顶上直接标「成功数 / 失败数」**，不悬停也能读。**0.8.7 起前端收敛成一条数据流**（一次 `/api/stats` → `renderAll()`），首页把原「我的账号池」和「额度统计」两张表合成一张：账号按状态分六组、可折叠、带搜索/分组/排序，批量栏常驻。Token 徽章是 **`Token 已确认` / `Token 未确认`**（只认上游真实证据：额度检测通过或成功出过图，且晚于最近一次换 Token），额度状态徽章是 **`额度可用` / `已限流` / `冷却到期` / `需先续期` / `额度查询失败` / `额度待检测` / `已失效`**，剩余额度单独一列，徽章里不再重复数字。批量删除的确认框是**自绘**（`confirmAction`）：页面跑在 Magpie 的沙箱 iframe 里（`Origin: null`，没有 `allow-modals`），原生 `confirm()` 会被浏览器直接丢弃并返回 false，表现就是「点了批量删除没反应」。 |
-| `gui/style.css` / `gui/dashboard.html` | 0.8.7 重做视觉：主色换成**深青**（亮/暗两套 CSS 变量，`#0f6e56` 只做品牌色，语义绿仍归「成功」），导航收成 **「总览 / 导入账号」两个 tab**（切换不发请求），表格改 `table-layout: fixed` + sticky 表头 + 可折叠分组行，窄屏逐级隐藏次要列。导入页功能没动，只是从「首页」降级成第二个 tab。 |
-| `test/*` | 140 个用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、授权失败判死（含额度检测里的 MFA 403）、预算超时、额度 400 换号、额度复检守卫、文本链路、按天统计、限流生命周期、导入格式（含 2 连字符）、面板分组/排序控件、批量接口、面板端口重试与恢复，以及图片桥的正文形态（both 分组 / 多图并发与顺序 / 部分成功 / 全失败 / 流式 / 面板设置读写 / 环境变量覆盖 / markdown 回退）。 |
+| `gui/style.css` / `gui/dashboard.html` | 0.8.7 重做视觉：主色换成**深青**（亮/暗两套 CSS 变量，`#0f6e56` 只做品牌色，语义绿仍归「成功」），导航收成 tab（切换不发请求），表格改 `table-layout: fixed` + sticky 表头 + 可折叠分组行，窄屏逐级隐藏次要列。**0.8.11 起多一个「图片」tab**：统计卡（总张数/总占用/最早/最晚）+ 近 14 天柱状图 + 排序与日期筛选 + 批量栏（删除选中 / 清理早于 N 天 / 全选筛选结果）+ 分页列表，缩略图 `loading="lazy"`，表格 `max-height` 取「表头 + 8 行」的整数值，避免底部露出半行。 |
+| `test/*` | 147 个用例，覆盖轮转比例、冷却阶梯、失败分类、判死与复活、授权失败判死（含额度检测里的 MFA 403）、预算超时、额度 400 换号、额度复检守卫、文本链路、按天统计、限流生命周期、导入格式（含 2 连字符）、面板分组/排序控件、批量接口、面板端口重试与恢复、图片桥的正文形态（both 分组 / 多图并发与顺序 / 部分成功 / 全失败 / 流式 / 面板设置读写 / 环境变量覆盖 / markdown 回退），以及图片页的文件名白名单、分页排序筛选、本地日期分桶、逐条容错删除、按天清理、保留天数现读设置，和三个图片接口的端到端流程。 |
 
 环境变量（都有默认值，一般不用设）：
 
@@ -49,6 +51,8 @@ MAGPIE_GPTFREE_PUBLIC_BASE        图片链接前缀，默认空 = 返回相对�
                                   要绝对地址就设成 https://你的域名（结尾斜杠会去掉）
 MAGPIE_GPTFREE_IMAGE_REPLY        正文形态，**一般不设**：面板「回复格式」里选即可（存 settings.json）。
                                   设了就强制覆盖面板，可选 both（默认，图+地址）/ url / markdown
+MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS  图片保留天数（1–90），**一般不设**：面板「保留」里选即可。
+                                  设了就强制覆盖面板（面板下拉置灰）。超过天数的图每小时清一次
 MAGPIE_GPTFREE_MAX_TOTAL_MS       单张图的预算（换号重试也算在里面），默认 55000。
                                   注意是**每张图一份**：n>1 是并发打多次，各自计时，不会叠加
 MAGPIE_GPTFREE_GUI_DEBUG          设 1 时输出面板端口重试的调试日志（默认不输出，避免刷屏）
@@ -76,8 +80,13 @@ node --test --test-concurrency=1
 一条命令看「上游动了什么、会不会撞上我们」：
 
 ```bash
-scripts/upstream-status.sh
+~/.magpie-gptpool-tools/upstream-status.sh
 ```
+
+> 这个脚本和发版脚本一样**不进仓库**（见下面「维护者本机工具」）。它要做的事很简单，
+> 想自己写一份也行：`git fetch upstream` → 用 `merge-base HEAD upstream/main` 算分叉点 →
+> `git diff --name-only <分叉点> upstream/main` 得到上游改过的文件集合 →
+> 跟我们改过的文件集合取交集，按「撞代码 / 撞文档 / 不撞」分级。
 
 输出会按风险分级，不是只报「落后几个提交」：
 
@@ -100,7 +109,7 @@ npm test
 合完重点看三个文件有没有被上游改过：`codex-pool.mjs`、`pool-stats.mjs`、`chatgpt-web-image.mjs`。
 上游动了这三处，就要按**我们的语义**重新落一遍，别机械解冲突。
 
-> 分叉点现在是 `5ab9b99`（我们领先 42 个提交）。`upstream-status.sh` 用 `merge-base` 算分叉点，
+> 分叉点现在是 `5ab9b99`（我们领先 42 个提交）。上游追踪脚本用 `merge-base` 算分叉点，
 > 所以合过一次之后不用改任何配置，它自己知道从哪儿开始算。
 
 ## 怎么装、怎么升级
@@ -119,11 +128,14 @@ npm test
 
 **升级流程**：本地改完 → 跑测试 → push 到 `patch/chat-image-bridge` → 部署机执行 `/root/gptfree-update-plugin.sh`。
 
-本地一条命令等价（走 `panel` 跳板，跑完会核对线上版本）：
+本地一条命令等价（走跳板机，跑完会核对线上版本）：
 
 ```bash
-scripts/update-server.sh
+~/.magpie-gptpool-tools/update-server.sh
 ```
+
+> 这个脚本**不在仓库里**：它要连生产机，而跳板别名 / 主机地址一旦进 git 就永久留在历史里。
+> 部署目标从仓库之外的 `~/.magpie-gptpool-release.env` 读（见下面「维护者本机工具」）。
 
 > 地址变迁（2026-11）：`puaicg-ship-it/magpie-gptfree` → 账号改名 → `puaicg/magpie-gptfree` → 仓库改名 → **`puaicg/magpie-gptpool`**。
 > 前两个地址都是 301 重定向，老机器上装着的旧 spec 不会立刻坏，但 `bun` 会把解析结果写成旧 URL，
@@ -136,37 +148,57 @@ scripts/update-server.sh
 
 ## 怎么发版
 
+> **发版脚本不进仓库**。仓库只放插件本身；发版 / 部署 / 上游追踪这三件事都碰得到本机路径、
+> 主机名和 token 位置，属于维护者本机工具，放在 `~/.magpie-gptpool-tools/`。
+> fork 的人照下面的流程自己写一份就行 —— 步骤都是 `git` 和 `npm` 的普通操作。
+
 ```bash
-cd ~/Documents/magpie-gptpool
-./scripts/release.sh 0.8.5 "改动一" "改动二"          # 发版
-./scripts/release.sh 0.8.5 "改动一" --deploy          # 发完顺手部署到 example.com
-./scripts/release.sh 0.8.5 "改动一" --release         # 顺便建 GitHub Release
-./scripts/release.sh 0.8.5 "改动一" --dry-run         # 只看要做什么
+~/.magpie-gptpool-tools/release.sh 0.8.11 "改动一" "改动二"   # 发版
+~/.magpie-gptpool-tools/release.sh 0.8.11 "改动一" --deploy   # 发完顺手部署
+~/.magpie-gptpool-tools/release.sh 0.8.11 "改动一" --release  # 顺便建 GitHub Release
+~/.magpie-gptpool-tools/release.sh 0.8.11 "改动一" --dry-run  # 只看要做什么
 ```
 
 脚本会：校验分支/工作区 → `npm run check` + 全部测试 → 升 `package.json` → 改 README 徽章 →
 在 CHANGELOG 顶部插一节 → `commit` → `git tag -a vX.Y.Z` → `push --follow-tags`。
 测试不过就中止，不写任何文件。
 
+**部署目标不写死在脚本里**，从仓库之外的 `~/.magpie-gptpool-release.env` 读（`MAGPIE_RELEASE_ENV`
+可以指到别处，权限建议 `chmod 600`）：
+
+```bash
+DEPLOY_JUMP=跳板别名                     # ~/.ssh/config 里的 Host 名
+DEPLOY_HOST=user@host
+DEPLOY_REMOTE_CMD='bash /root/gptfree-update-plugin.sh'   # 可选，有默认值
+DEPLOY_VERIFY_CMD='bash /root/verify-gptfree-patch.sh'    # 可选，有默认值
+```
+
+没有这个文件时 `--deploy` 会直接报错说明怎么配，而不是连一个猜出来的地址。
+
 **GitHub token（建 Release 才需要）**：别写进仓库里的任何文件 —— 发版脚本自己会 `git add -A`
 并提交，token 会被推到公开仓库，GitHub 的 secret scanning 还会直接吊销它。正确做法是
-`./scripts/release.sh --save-token`，交互输入（不回显、不进 shell 历史），macOS 存钥匙串，
+`release.sh --save-token`，交互输入（不回显、不进 shell 历史），macOS 存钥匙串，
 其他平台写本机文件。取用优先级：
 
 ```
 GITHUB_TOKEN 环境变量 > gh auth token > macOS 钥匙串
-  > scripts/.release-token（仓库内、被 .gitignore 忽略）
+  > ~/.magpie-gptpool-tools/.release-token（本机工具目录，不在仓库里）
   > ~/.magpie-gptpool-release-token（仓库之外）
 ```
 
-想「就放在脚本旁边」就直接写文件，不用改脚本本身：
+## 维护者本机工具（不在仓库里）
 
-```bash
-printf 'github_pat_xxx' > scripts/.release-token && chmod 600 scripts/.release-token
-```
+| 位置 | 干什么 |
+| --- | --- |
+| `~/.magpie-gptpool-tools/release.sh` | 发版：检查 → 测试 → 升版本 → 写 CHANGELOG → commit → tag → push →（可选）建 Release / 部署 |
+| `~/.magpie-gptpool-tools/update-server.sh` | 连生产机跑 `/root/gptfree-update-plugin.sh` 并核对线上版本 |
+| `~/.magpie-gptpool-tools/upstream-status.sh` | 按「撞不撞我们的改动」给上游提交分级 |
+| `~/.magpie-gptpool-release.env` | 上面两个脚本读的部署目标（0600，**永远不要提交**） |
 
-`scripts/release.sh` 是**被 git 跟踪的文件**，往里写 token 会被它自己的 `git add -A` 提交上去，
-不要那么干。
+仓库里 `.gitignore` 把这几个路径都挡住了（含 `*.release.env`）。为什么不干脆留在仓库里：
+这些脚本里原本写着跳板别名、生产机 IP 和远程脚本路径 —— 公开仓库等于把这些永久写进 git 历史，
+删掉文件也删不掉历史。**仓库里唯一保留的脚本是 `scripts/demo-preview.mjs`**（造假数据截图/验收用，
+只在本机临时目录操作，不含任何内网信息）。
 
 ## 账号数据在哪（重装插件不会动）
 
@@ -174,23 +206,20 @@ printf 'github_pat_xxx' > scripts/.release-token && chmod 600 scripts/.release-t
 | --- | --- |
 | 账号凭据（加密） | `~/.magpie-gptfree/pool.enc.json` + `master.key`（容器内 `/config/home/.magpie-gptfree/`） |
 | 健康账本 | 同目录 `pool-stats.json` |
-| 面板设置 | 同目录 `settings.json`（目前只有「回复格式」；面板上改，重启后还在） |
+| 面板设置 | 同目录 `settings.json`（回复格式 + 图片保留天数；面板上改，重启后还在） |
 | 插件代码 | `plugins/node_modules/magpie-gptpool/` |
 
 两个目录完全独立。重装/升级插件只替换后者，`master.key` 不变，加密的账号一定能解开。唯一会丢数据的情况是删掉整个 `~/.magpie-gptfree`。
 
-## 服务器上怎么用
+## 跑在容器里要注意什么
 
-部署机的 Magpie 里，插件目录是 `/config/magpie/plugins/node_modules/magpie-gptpool`（宿主机 `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptpool`）。
+部署机上的升级 / 校验 / 健康检查 / 备份脚本属于运维侧，**不随仓库分发**（同样因为会碰到主机地址和
+服务器路径）。这里只留两条容易踩的坑：
 
-- `/root/verify-gptfree-patch.sh` —— 校验我们的代码在位（退出码 0 表示正常）。安装源切过来之后正常情况下永远通过。
-- `/root/gptfree-update-plugin.sh` —— **升级用这个**：`bun update` 重新解析到最新提交 + 重启 + 校验。
-- `/root/fix-gptfree-chat-image.sh` —— 确保跑的是我们的代码。**现在会先看 spec**：指向本仓就直接 `exec /root/gptfree-update-plugin.sh`；指向上游才用 `/root/gptfree-patch/` 里的镜像文件覆盖（并提示把 spec 改回来）。镜像可能落后于仓库，所以优先走更新。
-- `/root/check-gptfree-health.sh` —— 池子容量健康检查，退出码 0/1。
-- `/root/gptfree-health-cron.sh` —— cron 包装，每 10 分钟一次；异常写 `/var/log/gptfree-health.log` 并送 syslog（`logger -t gptfree-health`），恢复时记一条 RECOVERED。
-- 备份：`/root/gptfree-backup/`（`vault-*.tar.gz` 是凭据，`plugin-dir-*.tar.gz` 是插件目录，`plugins.json.*` 是配置，`container-*.json` 是容器配置）。
-
-**注意**：直接改 `~/.magpie-gptfree/` 下的文件时，写完必须 `chown 65532:65532`。容器以 uid 65532 运行，属主不对的话插件读不到，表现是 `/api/health` 里所有账号变成「未检测」、额度全 0。
+- 插件目录在 Magpie 容器里的 `/config/magpie/plugins/node_modules/magpie-gptpool`，宿主机上对应
+  `/var/lib/docker/volumes/magpie-config/_data/magpie/plugins/node_modules/magpie-gptpool`。
+- **直接改 `~/.magpie-gptfree/` 下的文件时，写完必须 `chown 65532:65532`**。容器以 uid 65532 运行，
+  属主不对的话插件读不到，表现是 `/api/health` 里所有账号变成「未检测」、额度全 0。
 
 ## 许可
 

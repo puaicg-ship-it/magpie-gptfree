@@ -22,6 +22,7 @@
       <div class="tabs" role="tablist" aria-label="功能">
         <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="stats">总览 <span id="poolCount" class="count">—</span></button>
         <button type="button" role="tab" class="tab" aria-selected="false" data-tab="import">导入账号</button>
+        <button type="button" role="tab" class="tab" aria-selected="false" data-tab="images">图片 <span id="imageCount" class="count">—</span></button>
       </div>
 
       <section id="overviewPanel" class="panel" role="tabpanel">
@@ -175,6 +176,83 @@
             </thead>
             <tbody id="statsRows"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section id="imagesPanel" class="panel hidden" role="tabpanel">
+        <div class="section-head overview-head">
+          <div>
+            <h2>图片管理</h2>
+            <div id="imageStatus" class="batch-status tiny" role="status" aria-live="polite"></div>
+          </div>
+          <div class="pool-actions">
+            <label class="filter-field" title="超过这个天数的图片会被定时清理（每小时最多跑一次）；环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS 存在时这里只读">保留
+              <select id="imageRetention" aria-label="图片保留天数"></select>
+            </label>
+            <button id="imagesRefresh" type="button" class="btn quiet small">刷新</button>
+          </div>
+        </div>
+        <p class="muted tiny" id="imageRetentionHint">图片由插件生成并落盘，链接由 nginx 的 <code>/img/</code> 对外提供；这里只管「有多少、占多少、什么时候删」。</p>
+
+        <div class="stats-grid" id="imageStats" aria-label="图片统计概览"></div>
+
+        <div class="insights">
+          <article class="insight-card">
+            <div class="insight-head">
+              <h3>近 14 天生成数量</h3>
+              <span id="imageRange" class="muted tiny"></span>
+            </div>
+            <div id="imageChart" class="history-chart" role="img" aria-label="近 14 天生成数量"></div>
+          </article>
+        </div>
+
+        <div class="section-head with-top">
+          <h2>图片列表</h2>
+          <span class="muted tiny">缩略图按需加载 · 按住拖动可连续多选 · Shift 点选选一段</span>
+        </div>
+        <div class="pool-filter">
+          <label class="filter-field">排序
+            <select id="imageSort">
+              <option value="time">时间（新→旧）</option>
+              <option value="size">大小（大→小）</option>
+            </select>
+          </label>
+          <label class="filter-field">从 <input id="imageFrom" type="date" class="date-input"></label>
+          <label class="filter-field">到 <input id="imageTo" type="date" class="date-input"></label>
+          <button id="imageFilterClear" type="button" class="btn quiet small">清除筛选</button>
+          <span id="imageFilterInfo" class="muted tiny"></span>
+        </div>
+        <div id="imageBatchBar" class="batch-bar">
+          <span id="imageBatchCount" class="batch-count">已选 0 张</span>
+          <button id="imageDelete" type="button" class="btn danger small">删除选中</button>
+          <label class="filter-field">清理早于
+            <input id="imagePurgeDays" type="number" min="1" max="3650" value="30" class="num-input"> 天</label>
+          <button id="imagePurge" type="button" class="btn secondary small">执行清理</button>
+          <button id="imageSelectAll" type="button" class="btn secondary small">全选筛选结果</button>
+          <button id="imageSelectClear" type="button" class="btn secondary small">取消选择</button>
+          <span id="imageBatchStatus" class="batch-status" role="status" aria-live="polite"></span>
+        </div>
+        <div id="imageList" class="table-wrap pool-table-wrap">
+          <table class="pool-table image-table">
+            <colgroup>
+              <col class="col-pick"><col class="col-thumb"><col><col class="col-img-size"><col class="col-img-time">
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="pick"><input id="imagePickAll" type="checkbox" aria-label="全选本页"></th>
+                <th>缩略图</th>
+                <th>文件名</th>
+                <th>大小</th>
+                <th>生成时间</th>
+              </tr>
+            </thead>
+            <tbody id="imageRows"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="imagePrev" type="button" class="btn quiet small">上一页</button>
+          <span id="imagePageInfo" class="muted tiny"></span>
+          <button id="imageNext" type="button" class="btn quiet small">下一页</button>
         </div>
       </section>
 
