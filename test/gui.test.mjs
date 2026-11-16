@@ -577,9 +577,15 @@ test("GUI keeps a page usable across a plugin-host restart (persisted capability
     const html = await (await fetch(base + "ui")).text();
     token = html.match(/meta name="gptfree-session" content="([0-9a-f]{64})"/)?.[1];
     assert(token, "the page gets its capability");
-    // The capability is written for the next host process.
-    await new Promise((r) => setTimeout(r, 60));
-    const stored = JSON.parse(await readFile(sessionFile, "utf8"));
+    // The capability is written for the next host process. 写盘是 fire-and-forget，
+    // 固定 sleep 60ms 在机器忙的时候会读到还没 rename 的文件（ENOENT），
+    // 所以这里轮询到出现为止，最多等 2 秒。
+    let stored = null;
+    for (let i = 0; i < 40 && !stored; i++) {
+      try { stored = JSON.parse(await readFile(sessionFile, "utf8")); }
+      catch { await new Promise((r) => setTimeout(r, 50)); }
+    }
+    assert(stored, "session file is written");
     assert.equal(stored.sessions.length, 1);
     assert.equal(stored.sessions[0].id, token);
     assert(!JSON.stringify(stored).includes("@"), "no account data in the session file");

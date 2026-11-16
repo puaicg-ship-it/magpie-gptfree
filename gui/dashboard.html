@@ -19,10 +19,13 @@
       <span class="secure-pill"><span class="status-dot"></span> 本地运行</span>
     </header>
     <main>
-      <div class="tabs" role="tablist" aria-label="功能">
-        <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="stats">总览 <span id="poolCount" class="count">—</span></button>
-        <button type="button" role="tab" class="tab" aria-selected="false" data-tab="import">导入账号</button>
-        <button type="button" role="tab" class="tab" aria-selected="false" data-tab="images">图片 <span id="imageCount" class="count">—</span></button>
+      <div class="tabs-bar">
+        <div class="tabs" role="tablist" aria-label="功能">
+          <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="stats">总览 <span id="poolCount" class="count">0</span></button>
+          <button type="button" role="tab" class="tab" aria-selected="false" data-tab="images">图片 <span id="imageCount" class="count">0</span></button>
+          <button type="button" role="tab" class="tab" aria-selected="false" data-tab="settings">设置</button>
+        </div>
+        <button id="goImport" type="button" class="btn primary nav-import" title="粘贴账号文本或选择 TXT 文件，批量导入并自动授权入池">+ 导入账号</button>
       </div>
 
       <section id="overviewPanel" class="panel" role="tabpanel">
@@ -35,21 +38,21 @@
             <button id="refreshAllPool" type="button" class="btn primary small" title="逐个验证 Token，过期的自动重新登录，并各查一次剩余生图额度">全部检测额度</button>
             <button id="syncProviders" type="button" class="btn secondary small">同步到 Providers</button>
             <button id="refreshAccounts" type="button" class="btn quiet small" title="重新读取本机号池文件，不请求上游">刷新列表</button>
-            <button id="goImport" type="button" class="btn secondary small">+ 导入账号</button>
           </div>
         </div>
         <div class="pool-toolbar">
           <div id="overviewMeta" class="pool-summary">加载中…</div>
           <div class="pool-toolbar-side">
-            <label class="filter-field" title="图片模型经 chat/completions 回复时的正文形态；客户端「复制」复制的是正文文本，所以要带一行裸地址">回复格式
-              <select id="imageReplyMode" aria-label="图片回复格式">
-                <option value="both">图 + 地址</option>
-                <option value="url">只要地址</option>
-                <option value="markdown">只要内联图</option>
-              </select>
-            </label>
-            <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="检测用代理地址" placeholder="检测代理（可选）如 http://127.0.0.1:7890">
+            <input id="poolProxyInput" type="url" class="pool-proxy" spellcheck="false" autocomplete="off" aria-label="检测用代理地址" placeholder="检测代理（可选）" title="检测额度 / 刷新授权时走的 HTTP(S) 代理，例如 http://127.0.0.1:7890；留空则自动检测常见本地代理或直连">
           </div>
+        </div>
+
+        <div id="poolEmpty" class="empty-cta hidden" role="status">
+          <div class="empty-cta-icon" aria-hidden="true">＋</div>
+          <h3>号池里还没有账号</h3>
+          <p>先把账号导进来，号池才会开始轮询、检测额度、出图。支持直接粘贴多行文本，也支持选择 TXT 文件。</p>
+          <button id="goImportEmpty" type="button" class="btn primary">+ 导入账号</button>
+          <p class="empty-cta-hint">格式：<code>邮箱----密码----2FA密钥</code>，分隔符写 <code>----</code>、<code>---</code> 或 <code>--</code> 都认</p>
         </div>
 
         <div class="section-head with-top">
@@ -115,20 +118,20 @@
         </div>
         <div id="statsHint" class="stats-hint hidden" role="status"></div>
 
-        <div class="section-head with-top">
+        <div id="poolDeadHead" class="section-head with-top">
           <h2>失效账号分类</h2>
           <span class="muted tiny">判死只是不再派活，账号仍在池子里；点分类可只选这一类</span>
         </div>
         <div id="deadGroups" class="dead-groups"></div>
 
-        <div class="section-head with-top">
+        <div id="poolListHead" class="section-head with-top">
           <h2>账号列表</h2>
           <div class="pool-actions">
             <button id="refreshStatsQuota" type="button" class="btn quiet small" title="只重新查一遍剩余生图额度，不动 Token、不重新登录">刷新全部额度</button>
           </div>
         </div>
         <p class="muted tiny" id="tableHint">点表头排序；勾选左侧复选框可批量检测额度或批量删除；点分组标题可折叠</p>
-        <div class="pool-filter">
+        <div id="poolFilterBar" class="pool-filter">
           <input id="poolSearch" type="search" class="pool-search" spellcheck="false" autocomplete="off" aria-label="搜索账号" placeholder="搜索打码邮箱或槽位号…">
           <label class="filter-field">分组
             <select id="poolGroupSelect">
@@ -186,19 +189,11 @@
             <div id="imageStatus" class="batch-status tiny" role="status" aria-live="polite"></div>
           </div>
           <div class="pool-actions">
-            <label class="filter-field" title="自动清理只在这个时段内跑，避开生图高峰（清理要先扫一遍目录，上千张时在慢盘上要几百毫秒）。手动「执行清理」「删除选中」不受限制。跨午夜直接选 22 点到 6 点">
-              清理时段
-              <select id="imageCleanupFrom" aria-label="清理时段起始小时"></select>
-              <span aria-hidden="true">–</span>
-              <select id="imageCleanupTo" aria-label="清理时段结束小时"></select>
-            </label>
-            <label class="filter-field" title="超过这个天数的图片会被定时清理（每小时最多跑一次）；环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS 存在时这里只读">保留
-              <select id="imageRetention" aria-label="图片保留天数"></select>
-            </label>
+            <button id="goSettingsFromImages" type="button" class="btn secondary small" title="保留天数、自动清理时段、立即清理与清理日志都在设置页">清理设置</button>
             <button id="imagesRefresh" type="button" class="btn quiet small">刷新</button>
           </div>
         </div>
-        <p class="muted tiny" id="imageRetentionHint">图片由插件生成并落盘，链接由 nginx 的 <code>/img/</code> 对外提供；这里只管「有多少、占多少、什么时候删」。</p>
+        <p class="muted tiny" id="imageRetentionHint">图片由插件生成并落盘，链接由 nginx 的 <code>/img/</code> 对外提供；这里只管「有多少、占多少、删哪些」。自动清理的保留天数与时段在「设置」页。</p>
 
         <div class="stats-grid" id="imageStats" aria-label="图片统计概览"></div>
 
@@ -237,9 +232,6 @@
         <div id="imageBatchBar" class="batch-bar">
           <span id="imageBatchCount" class="batch-count">已选 0 张</span>
           <button id="imageDelete" type="button" class="btn danger small">删除选中</button>
-          <label class="filter-field">清理早于
-            <input id="imagePurgeDays" type="number" min="1" max="3650" value="30" class="num-input"> 天</label>
-          <button id="imagePurge" type="button" class="btn secondary small">执行清理</button>
           <button id="imageSelectAll" type="button" class="btn secondary small">全选筛选结果</button>
           <button id="imageSelectClear" type="button" class="btn secondary small">取消选择</button>
           <span id="imageBatchStatus" class="batch-status" role="status" aria-live="polite"></span>
@@ -267,6 +259,86 @@
           <span id="imagePageInfo" class="muted tiny"></span>
           <button id="imageNext" type="button" class="btn quiet small">下一页</button>
         </div>
+      </section>
+
+      <section id="settingsPanel" class="panel hidden" role="tabpanel">
+        <div class="section-head overview-head">
+          <div>
+            <h2>设置</h2>
+            <div id="settingsStatus" class="batch-status tiny" role="status" aria-live="polite"></div>
+          </div>
+          <div class="pool-actions">
+            <button id="settingsRefresh" type="button" class="btn quiet small" title="重新读取本机设置文件">刷新</button>
+          </div>
+        </div>
+        <p class="muted tiny">设置存在本机 <code>~/.magpie-gptfree/settings.json</code>，改完立刻生效、不用重启插件宿主。同名环境变量存在时会强制覆盖，这里会置灰并标明。</p>
+
+        <div class="settings-grid">
+          <article class="settings-card">
+            <h3>图片回复格式</h3>
+            <p class="settings-note">图片模型经 <code>chat/completions</code> 回复时的正文形态。客户端「复制」复制的是这段正文文本，所以要带一行裸地址。</p>
+            <label class="filter-field">回复格式
+              <select id="settingsReplyMode" aria-label="图片回复格式">
+                <option value="both">图 + 地址</option>
+                <option value="url">只要地址</option>
+                <option value="markdown">只要内联图</option>
+              </select>
+            </label>
+            <p class="settings-hint" id="settingsReplyHint"></p>
+          </article>
+
+          <article class="settings-card">
+            <h3>自动清理</h3>
+            <p class="settings-note">超过保留天数的图片会被定时清理（每小时最多跑一次），并且只在下面的时段内跑 —— 清理要先扫一遍目录，避开生图高峰更稳。</p>
+            <div class="settings-row">
+              <label class="filter-field">保留
+                <select id="settingsRetention" aria-label="图片保留天数"></select>
+              </label>
+              <label class="filter-field">时段
+                <select id="settingsCleanupFrom" aria-label="清理时段起始小时"></select>
+                <span aria-hidden="true">–</span>
+                <select id="settingsCleanupTo" aria-label="清理时段结束小时"></select>
+              </label>
+            </div>
+            <p class="settings-hint" id="settingsRetentionHint"></p>
+          </article>
+        </div>
+
+        <article class="settings-card with-top">
+          <h3>立即清理</h3>
+          <p class="settings-note">不受保留天数和清理时段限制，删掉早于 N 天的图片，用来临时腾地方。这次清理不改全局保留天数。</p>
+          <div class="settings-row">
+            <label class="filter-field">清理早于
+              <input id="settingsPurgeDays" type="number" min="1" max="3650" value="30" class="num-input"> 天
+            </label>
+            <button id="settingsPurge" type="button" class="btn secondary small">执行清理</button>
+            <span id="settingsPurgeStatus" class="batch-status" role="status" aria-live="polite"></span>
+          </div>
+        </article>
+
+        <div class="section-head with-top">
+          <h2>清理日志</h2>
+          <div class="head-side">
+            <span class="muted tiny" id="cleanupLogInfo">自动清理与手动删除都会记一条，只留最近 500 条</span>
+            <button id="cleanupLogRefresh" type="button" class="btn quiet small">刷新</button>
+            <button id="cleanupLogClear" type="button" class="btn quiet small danger-text">清空日志</button>
+          </div>
+        </div>
+        <div class="table-wrap cleanup-log-wrap">
+          <table class="pool-table cleanup-table">
+            <colgroup>
+              <col class="col-log-time"><col class="col-log-trigger"><col class="col-log-num">
+              <col class="col-log-num"><col class="col-log-num"><col>
+            </colgroup>
+            <thead>
+              <tr>
+                <th>时间</th><th>触发方式</th><th>删除</th><th>释放</th><th>失败</th><th>参数</th>
+              </tr>
+            </thead>
+            <tbody id="cleanupLogRows"></tbody>
+          </table>
+        </div>
+        <p class="footnote">日志只记数量、释放空间和触发方式，不记文件名与账号信息；文件在 <code>~/.magpie-gptfree/cleanup-log.jsonl</code>。</p>
       </section>
 
       <section id="importPanel" class="panel hidden" role="tabpanel">

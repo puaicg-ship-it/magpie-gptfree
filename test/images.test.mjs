@@ -363,9 +363,35 @@ test("GUI image API lists, serves thumbnails, deletes and purges", async () => {
     });
     assert.equal((await post("settings", { imageCleanupWindow: { from: 5, to: 5 } })).status, 400);
     assert.equal((await post("settings", { imageCleanupWindow: "25-3" })).status, 400);
+
+    // 设置页是独立 tab，用户可能一次都没进过图片页 —— 所以 /api/stats 也得带
+    // 保留天数与清理时段，否则设置页要等第二次请求才能显示。
+    const stats = await get("stats");
+    assert.equal(stats.status, 200);
+    assert.deepEqual(stats.json.imageRetention, { days: 14, source: "settings", locked: false });
+    assert.deepEqual(stats.json.imageCleanup, { from: 22, to: 6, source: "settings", locked: false });
+
     // 手动清理不受时段限制：现在是白天也照样删
     const manual = await post("images/purge", { olderThanDays: 1 });
     assert.equal(manual.status, 200);
+
+    // 清理日志：上面那几次「删除选中」和「手动清理」都该留下记录。
+    const log = await get("images/cleanup-log");
+    assert.equal(log.status, 200);
+    assert.equal(log.json.total, 2, "删选中 1 条 + 手动清理 1 条");
+    assert.equal(log.json.items[0].trigger, "manual-purge", "新的在前");
+    assert.equal(log.json.items[1].trigger, "manual-delete");
+    assert.equal(log.json.items[1].deleted, 2);
+    assert.ok(log.json.items[1].bytes > 0, "要记释放了多少空间");
+
+    // 日志落在 poolDir 里，和 vault / settings 同一个家。
+    assert.equal((await stat(join(fx.home, "cleanup-log.jsonl"))).isFile(), true);
+
+    const cleared = await post("images/cleanup-log/clear", {});
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.json.removed, 2);
+    assert.deepEqual((await get("images/cleanup-log")).json, { total: 0, items: [], limit: 500 });
+    await assert.rejects(() => stat(join(fx.home, "cleanup-log.jsonl")));
   } finally {
     await service.close();
     await cleanup(fx.root);

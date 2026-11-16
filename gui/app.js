@@ -769,6 +769,7 @@
     const accounts = accountsOf();
     $("poolCount").textContent = String(accounts.length);
     renderMeta(accounts);
+    renderEmptyState(accounts);
     renderCards();
     renderHint();
     renderHistory(snapshot);
@@ -777,13 +778,36 @@
     syncSelection();
     renderTable();
     renderBatchBar();
-    renderImageReplyMode();
+    // 设置页是独立 tab，但它的值跟统计同一条数据流下发（/api/stats），
+    // 所以这里顺手渲染，切过去就是对的，不用再等一次请求。
+    adoptSettings();
+    renderSettings();
+  }
+
+  // 一个账号都没有时，六个统计数字全是 0，看起来像页面坏了。这里给一条明确的路：
+  // 收起账号表 / 筛选 / 批量栏 / 失效分类，把「+ 导入账号」放大摆在中间。
+  function renderEmptyState(accounts) {
+    const empty = accounts.length === 0;
+    $("poolEmpty")?.classList.toggle("hidden", !empty);
+    for (const id of [
+      "poolFilterBar", "poolBatchBar", "poolList", "tableHint",
+      "poolDeadHead", "deadGroups", "poolListHead",
+    ]) {
+      $(id)?.classList.toggle("hidden", empty);
+    }
+  }
+
+  // 保留天数 / 清理时段：优先用 /api/stats 下发的值，图片页的 /api/images
+  // 也带同一份，谁先到用谁的。两处都写进 imageState，设置页与图片页共用。
+  function adoptSettings() {
+    if (snapshot?.imageRetention) imageState.retention = snapshot.imageRetention;
+    if (snapshot?.imageCleanup) imageState.cleanup = snapshot.imageCleanup;
   }
 
   // 回复格式：值跟统计一起从 /api/stats 下发，不额外发请求。
   // 环境变量压着设置文件时下拉置灰 —— 让用户改一个改了不生效的东西最坑。
-  function renderImageReplyMode() {
-    const select = $("imageReplyMode");
+  function renderReplyMode() {
+    const select = $("settingsReplyMode");
     const info = snapshot?.imageReply;
     if (!select || !info) return;
     select.value = info.mode;
@@ -791,13 +815,30 @@
     select.title = info.locked
       ? `环境变量 MAGPIE_GPTFREE_IMAGE_REPLY=${info.mode} 正在强制覆盖，改这里不生效`
       : "图片模型经 chat/completions 回复时的正文形态；复制出来的是这段正文文本";
+    const hint = $("settingsReplyHint");
+    if (hint) {
+      hint.textContent = info.locked
+        ? `环境变量 MAGPIE_GPTFREE_IMAGE_REPLY=${info.mode} 正在强制覆盖，这里改了不生效。`
+        : {
+          both: "正文里同时给内联图和一行裸地址：既能直接看图，复制出去也是一条可用链接。",
+          url: "正文只给一行裸地址：适合把地址粘到别处，聊天框里不显示图。",
+          markdown: "正文只给内联图：适合只想看图、不关心地址的场景。",
+        }[info.mode] || "";
+    }
+  }
+
+  function renderSettings() {
+    renderReplyMode();
+    renderImageCleanup();
+    renderImageRetention();
   }
 
   function renderMeta(accounts) {
     const qs = snapshot?.quotaStats || {};
     const confirmed = accounts.filter((a) => tokenBadge(a).confirmed).length;
     if (!accounts.length) {
-      $("overviewMeta").textContent = "号池暂无账号 · 点「导入账号」添加第一批";
+      // 下面紧跟着就是「号池里还没有账号」的空态卡，这里只报事实，不再重复引导语。
+      $("overviewMeta").textContent = "号池暂无账号";
       return;
     }
     const parts = [
@@ -1665,7 +1706,7 @@
     return sum;
   }
 
-  async function loadImages({ reset = false } = {}) {
+  async function loadImages({ reset = false, quiet = false } = {}) {
     if (imageState.loading) return;
     imageState.loading = true;
     if (reset) {
@@ -1679,10 +1720,13 @@
       imageState.cleanup = data.cleanup || imageState.cleanup;
       rememberImages(data.items);
       renderImages();
+      // 设置页的保留天数 / 时段提示也吃这份数据，顺手对齐。
+      renderSettings();
       $("imageStatus").textContent = "";
     } catch (err) {
       $("imageStatus").textContent = "图片列表读取失败：" + err.message;
-      notice(err.message, true);
+      // quiet：设置页触发的后台刷新不该弹全局提示，那里有自己的状态位。
+      if (!quiet) notice(err.message, true);
     } finally {
       imageState.loading = false;
     }
@@ -1790,8 +1834,8 @@
 
   function renderImageCleanup() {
     const info = imageState.cleanup;
-    const from = $("imageCleanupFrom");
-    const to = $("imageCleanupTo");
+    const from = $("settingsCleanupFrom");
+    const to = $("settingsCleanupTo");
     if (!from || !to || !info) return;
     if (!from.dataset.built) {
       // 起始 0–23，结束 1–24：24 表示「到当天结束」，也就是全天。
@@ -1816,7 +1860,7 @@
   }
 
   function renderImageRetention() {
-    const select = $("imageRetention");
+    const select = $("settingsRetention");
     const info = imageState.retention;
     if (!select || !info) return;
     const choices = [...new Set([...RETENTION_CHOICES, Number(info.days)])].sort((a, b) => a - b);
@@ -1833,9 +1877,151 @@
     select.value = String(info.days);
     select.disabled = Boolean(info.locked);
     const window = cleanupWindowText(imageState.cleanup);
-    $("imageRetentionHint").textContent = info.locked
+    $("settingsRetentionHint").textContent = info.locked
       ? `环境变量 MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS=${info.days} 正在强制覆盖，这里改了不生效。`
-      : `超过 ${info.days} 天的图片会被自动清理，只在「${window || "全天"}」内跑（每小时最多一次）。改完立刻生效、不用重启；想马上腾地方用下面的「清理早于 N 天」。`;
+      : `超过 ${info.days} 天的图片会被自动清理，只在「${window || "全天"}」内跑（每小时最多一次）。改完立刻生效、不用重启；想马上腾地方用下面的「立即清理」。`;
+    // 图片页那行提示也带着保留期，两处口径要一致。
+    const hint = $("imageRetentionHint");
+    if (hint) {
+      hint.textContent = `图片由插件生成并落盘，链接由 nginx 的 /img/ 对外提供；这里只管「有多少、占多少、删哪些」。` +
+        `自动清理：保留 ${info.days} 天，只在「${window || "全天"}」内跑。`;
+    }
+  }
+
+  // ---------- 清理日志 ----------
+  // 自动清理是默默发生的：图打不开了，用户分不清是被保留期清掉的、自己删的，
+  // 还是压根没生成。这份日志就是那条痕迹。
+  let cleanupLog = null;
+  let cleanupLogLoading = false;
+
+  async function loadCleanupLog() {
+    if (cleanupLogLoading) return;
+    cleanupLogLoading = true;
+    try {
+      cleanupLog = await api("images/cleanup-log?limit=100");
+      renderCleanupLog();
+    } catch (err) {
+      $("cleanupLogInfo").textContent = "清理日志读取失败：" + err.message;
+    } finally {
+      cleanupLogLoading = false;
+    }
+  }
+
+  const CLEANUP_TRIGGER_TEXT = {
+    auto: "自动清理",
+    "manual-purge": "手动清理",
+    "manual-delete": "删除选中",
+  };
+
+  /** 日志里的「参数」列：自动清理说清保留几天 + 时段，手动清理说清早于几天。 */
+  function cleanupArgsText(entry) {
+    if (entry.trigger === "auto") {
+      const parts = [];
+      if (entry.days) parts.push(`保留 ${entry.days} 天`);
+      if (entry.window) parts.push(`时段 ${cleanupWindowText(entry.window)}`);
+      return parts.join(" · ") || "—";
+    }
+    if (entry.trigger === "manual-purge") {
+      return entry.days ? `早于 ${entry.days} 天` : "—";
+    }
+    return "手动勾选";
+  }
+
+  function renderCleanupLog() {
+    const body = $("cleanupLogRows");
+    if (!body) return;
+    body.replaceChildren();
+    const items = cleanupLog?.items || [];
+    const info = $("cleanupLogInfo");
+    if (info) {
+      info.textContent = cleanupLog
+        ? (items.length < (cleanupLog.total || 0)
+          ? `共 ${cleanupLog.total} 条，显示最近 ${items.length} 条`
+          : `共 ${items.length} 条 · 只留最近 500 条`)
+        : "自动清理与手动删除都会记一条，只留最近 500 条";
+    }
+    if (!items.length) {
+      const row = el("tr", "empty-row");
+      const cell = el("td", "", "还没有清理记录。第一次自动清理或手动删除之后，这里会出现一条。");
+      cell.colSpan = 6;
+      row.append(cell);
+      body.append(row);
+      return;
+    }
+    for (const entry of items) {
+      const row = el("tr");
+      const time = el("td", "log-time", formatShortTime(entry.at));
+      time.title = entry.at;
+      const trigger = el("td", "");
+      const cls = entry.trigger === "auto" ? "neutral" : entry.trigger === "manual-purge" ? "warn" : "bad";
+      trigger.append(el("span", "pill " + cls, CLEANUP_TRIGGER_TEXT[entry.trigger] || entry.trigger));
+      const deleted = el("td", "log-num" + (entry.deleted ? "" : " zero"), String(entry.deleted ?? 0));
+      const bytes = el("td", "log-num" + (entry.bytes ? "" : " zero"), entry.bytes ? formatBytes(entry.bytes) : "—");
+      const failed = el("td", "log-num" + (entry.failed ? "" : " zero"), String(entry.failed ?? 0));
+      row.append(time, trigger, deleted, bytes, failed, el("td", "log-args", cleanupArgsText(entry)));
+      body.append(row);
+    }
+  }
+
+  async function clearCleanupLog() {
+    const sure = await confirmAction({
+      title: "清空清理日志",
+      message: "只删掉这份记录，不会动图片。清空之后历史清理就查不回来了。",
+      confirmText: "清空日志",
+    });
+    if (!sure) return;
+    try {
+      const result = await api("images/cleanup-log/clear", {});
+      cleanupLog = { total: 0, items: [] };
+      renderCleanupLog();
+      notice(`已清空 ${result.removed || 0} 条清理记录`);
+    } catch (err) {
+      notice(err.message, true);
+    }
+  }
+
+  // 设置页的「立即清理」：不受保留天数和时段限制，跟图片页原来的「执行清理」是同一个动作。
+  async function purgeFromSettings() {
+    const days = Number($("settingsPurgeDays").value);
+    if (!Number.isFinite(days) || days < 1) {
+      notice("清理天数要填 1 以上", true);
+      return;
+    }
+    const status = $("settingsPurgeStatus");
+    const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+    let preview;
+    try {
+      // 先问服务端「早于 N 天的一共有多少」，确认框里才能写准确数字和总大小。
+      preview = await api(imageQuery({ namesOnly: true, from: "", to: cutoff }));
+    } catch (err) {
+      notice(err.message, true);
+      return;
+    }
+    if (!preview.total) {
+      status.textContent = "";
+      notice(`没有早于 ${days} 天的图片`);
+      return;
+    }
+    const sure = await confirmAction({
+      title: "清理旧图片",
+      message: `将删除 ${preview.total} 张早于 ${days} 天的图片，共 ${formatBytes(preview.bytes)}。` +
+        "已经发出去的链接会立即 404，无法恢复。这次清理不改全局保留天数。",
+      confirmText: "确认删除",
+    });
+    if (!sure) return;
+    status.textContent = "正在清理…";
+    try {
+      const result = await api("images/purge", { olderThanDays: days });
+      const failed = result.failed || [];
+      status.textContent = failed.length
+        ? `清理了 ${result.deleted} 张，失败 ${failed.length} 张`
+        : `已清理 ${result.deleted} 张早于 ${days} 天的图片`;
+      // 图片列表和日志都可能变了：列表在后台静默刷一次（用户可能没打开图片页）。
+      await Promise.all([loadImages({ reset: true, quiet: true }), loadCleanupLog()]);
+    } catch (err) {
+      status.textContent = "";
+      notice(err.message, true);
+    }
   }
 
   function renderImageRows(data) {
@@ -2025,48 +2211,7 @@
     status.textContent = failed.length
       ? `成功 ${deleted} 张，失败 ${failed.length} 张（${failed.slice(0, 3).map((f) => f.reason).join("；")}${failed.length > 3 ? "…" : ""}）`
       : `已删除 ${deleted} 张`;
-    await loadImages();
-  }
-
-  async function purgeOldImages() {
-    const days = Number($("imagePurgeDays").value);
-    if (!Number.isFinite(days) || days < 1) {
-      notice("清理天数要填 1 以上", true);
-      return;
-    }
-    const cutoff = new Date(Date.now() - days * 86400000).toISOString();
-    let preview;
-    try {
-      // 先问服务端「早于 N 天的一共有多少」，确认框里才能写准确数字和总大小。
-      preview = await api(imageQuery({ namesOnly: true, from: "", to: cutoff }));
-    } catch (err) {
-      notice(err.message, true);
-      return;
-    }
-    if (!preview.total) {
-      notice(`没有早于 ${days} 天的图片`);
-      return;
-    }
-    const sure = await confirmAction({
-      title: "清理旧图片",
-      message: `将删除 ${preview.total} 张早于 ${days} 天的图片，共 ${formatBytes(preview.bytes)}。` +
-        "已经发出去的链接会立即 404，无法恢复。这次清理不改全局保留天数。",
-      confirmText: "确认删除",
-    });
-    if (!sure) return;
-    const status = $("imageBatchStatus");
-    status.textContent = "正在清理…";
-    try {
-      const result = await api("images/purge", { olderThanDays: days });
-      const failed = result.failed || [];
-      status.textContent = failed.length
-        ? `清理了 ${result.deleted} 张，失败 ${failed.length} 张`
-        : `已清理 ${result.deleted} 张早于 ${days} 天的图片`;
-      await loadImages({ reset: true });
-    } catch (err) {
-      status.textContent = "";
-      notice(err.message, true);
-    }
+    await Promise.all([loadImages(), loadCleanupLog()]);
   }
 
   async function selectAllFilteredImages() {
@@ -2093,19 +2238,29 @@
     hidden("overviewPanel", next !== "stats");
     hidden("importPanel", next !== "import");
     hidden("imagesPanel", next !== "images");
-    // 图片页的数据量跟账号页无关，切过去才拉（服务端有 30 秒目录缓存，重复切不贵）。
+    hidden("settingsPanel", next !== "settings");
+    // 导入页没有对应的 tab —— 它是导航右侧那个按钮。这里给按钮加个「正在这里」的圈，
+    // 否则点进导入页后整排 tab 全是灰的，看着像什么都没选中。
+    $("goImport")?.classList.toggle("is-on", next === "import");
+    // 图片页 / 设置页的数据量跟账号页无关，切过去才拉
+    //（服务端有 30 秒目录缓存，重复切不贵）。
     if (next === "images") loadImages();
+    if (next === "settings") loadCleanupLog();
   }
 
   function setup() {
-    // 两个 tab：总览（默认）/ 导入账号。data-tab 沿用 stats / import，
-    // 这样 #action=manage-pool、#action=stats 两个深链不用改。
+    // tab：总览 / 图片 / 设置。导入页不占 tab，走导航右侧的「+ 导入账号」。
+    // data-tab 沿用 stats / import / images，这样 #action=manage-pool、
+    // #action=stats、#action=batch-import 几个深链不用改。
     document.querySelectorAll(".tab").forEach((button) =>
       button.addEventListener("click", () => tab(button.dataset.tab)));
-    $("goImport").addEventListener("click", () => {
+    const openImport = () => {
       tab("import");
       $("pasteAccounts").focus();
-    });
+    };
+    $("goImport").addEventListener("click", openImport);
+    $("goImportEmpty")?.addEventListener("click", openImport);
+    $("goSettingsFromImages")?.addEventListener("click", () => tab("settings"));
 
     $("checkPaste").addEventListener("click", async () => {
       if (busy) return;
@@ -2242,7 +2397,7 @@
       renderHistory(snapshot);
     });
     // 回复格式：写进本机设置文件，立即生效（不用重启插件宿主）。
-    $("imageReplyMode")?.addEventListener("change", async (event) => {
+    $("settingsReplyMode")?.addEventListener("change", async (event) => {
       const select = event.target;
       const previous = snapshot?.imageReply?.mode || "both";
       select.disabled = true;
@@ -2289,7 +2444,6 @@
       loadImages();
     });
     $("imageDelete")?.addEventListener("click", deleteSelectedImages);
-    $("imagePurge")?.addEventListener("click", purgeOldImages);
     $("imageSelectAll")?.addEventListener("click", selectAllFilteredImages);
     $("imageSelectClear")?.addEventListener("click", () => {
       imageState.selection.clear();
@@ -2305,12 +2459,25 @@
       renderImageList();
       renderImageBatchBar();
     });
-    $("imageRetention")?.addEventListener("change", async (event) => {
+
+    // ---------- 设置页 ----------
+    $("settingsRefresh")?.addEventListener("click", async () => {
+      $("settingsStatus").textContent = "正在刷新…";
+      try {
+        await refreshData({ quiet: true });
+        await loadCleanupLog();
+        $("settingsStatus").textContent = "";
+      } catch (err) {
+        $("settingsStatus").textContent = "刷新失败：" + err.message;
+      }
+    });
+    $("settingsRetention")?.addEventListener("change", async (event) => {
       const select = event.target;
       select.disabled = true;
       try {
         const result = await api("settings", { imageRetentionDays: Number(select.value) });
         imageState.retention = result.imageRetention || imageState.retention;
+        if (snapshot) snapshot.imageRetention = imageState.retention;
         notice(result.message || "保留天数已更新");
       } catch (err) {
         notice(err.message, true);
@@ -2319,10 +2486,10 @@
     });
     // 清理时段：两个下拉一起读，改哪个都按当前这对值提交。
     // 起止相同会被服务端拒（空时段），这里先拦一道，避免来回弹提示。
-    for (const id of ["imageCleanupFrom", "imageCleanupTo"]) {
+    for (const id of ["settingsCleanupFrom", "settingsCleanupTo"]) {
       $(id)?.addEventListener("change", async () => {
-        const from = Number($("imageCleanupFrom").value);
-        const to = Number($("imageCleanupTo").value);
+        const from = Number($("settingsCleanupFrom").value);
+        const to = Number($("settingsCleanupTo").value);
         if (from === to) {
           notice("起止不能是同一个小时", true);
           renderImageCleanup();
@@ -2331,6 +2498,7 @@
         try {
           const result = await api("settings", { imageCleanupWindow: { from, to } });
           imageState.cleanup = result.imageCleanup || imageState.cleanup;
+          if (snapshot) snapshot.imageCleanup = imageState.cleanup;
           notice(result.message || "清理时段已更新");
         } catch (err) {
           notice(err.message, true);
@@ -2339,6 +2507,12 @@
         renderImageRetention();   // 提示文案里带着时段
       });
     }
+    $("settingsPurge")?.addEventListener("click", purgeFromSettings);
+    $("cleanupLogRefresh")?.addEventListener("click", () => {
+      $("cleanupLogInfo").textContent = "正在刷新…";
+      loadCleanupLog();
+    });
+    $("cleanupLogClear")?.addEventListener("click", clearCleanupLog);
     // 拖动框选：按住某一行（或某张卡片）往下/往上划过一片就连续选中（像文件管理器）。
     // 重绘会换掉鼠标下的节点，所以只在选择真的变了时才重绘，否则会打转。
     // 挂在外层容器上、用 [data-name] 找目标：列表的行和网格的卡片都带这个属性。
@@ -2396,7 +2570,21 @@
     tab(activeTab);
     loadPendingDraft();
     refreshData();
+    refreshImageCount();
     status();
+  }
+  /**
+   * 导航上「图片」后面的数字。图片列表是懒加载的（切过去才拉），但导航上的数字
+   * 一直摆在那儿 —— 不主动问一次的话，号池里明明有图也会显示 0。
+   * 只取一页 1 张：服务端返回的 allCount 就是总数，不必把整个列表拉回来。
+   */
+  async function refreshImageCount() {
+    try {
+      const data = await api("images?limit=1");
+      $("imageCount").textContent = String(data.allCount ?? data.total ?? 0);
+    } catch {
+      // 拿不到就保持 HTML 里的 0：一个数字而已，不值得为它弹错误。
+    }
   }
   setup();
 })();
