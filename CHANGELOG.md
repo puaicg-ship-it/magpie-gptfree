@@ -4,6 +4,16 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.8.16] - 2026-11-17
+
+### 变更
+
+- **上游 422 不再是天书**：错误文案改成「上游 422：上游原文（哪一步｜model｜角色｜条数）」，上游原文用 JSON 表示 —— 不再是 Python 的 {'detail': ...} 单引号 repr；降级全试完还会带上试过哪几种 body 形态
+- **上游拒绝请求体时自动降级重试**：先原样发，被 400/422 拒了就把 system / developer 折进第一条 user 消息，还不行再去掉 thinking_effort。只有 400/422 才降级，正常请求仍然一次就成
+- **thinking_effort 的重试条件修对了**：原来要求上游响应体里出现 thinking_effort 才重试，可它常常只回一句 Invalid conversation body，那个条件永远不成立 —— 等于没写。现在只要这一轮带了 effort 就重试一次不带
+- **空响应体不再冒充生图错误**：文本链路拿不到上游 body 时，原来会被空值兜底写成 Image generation failed，现在留空、照常报状态码
+- 用例：Python 23（+4）、Node 166（+1）；CI 补跑 Python 单测
+
 ## [0.8.15] - 2026-11-16
 
 ### 新增
