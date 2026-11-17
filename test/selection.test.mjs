@@ -711,3 +711,37 @@ test("a pending exploration forces the early hedge even when the head is proven"
     12_000,
   );
 });
+
+// 「有额度 + 近期没出过错」的号要优先：额度相近时，干净号（出过图、连续失败 0）
+// 必须排在刚超时过的号前面。以前权重只看剩余额度，一个额度 25 刚超时两次的号
+// 会压过额度 8、连续成功 4 次的号。
+test("a clean account outranks an equally funded one that just failed", () => {
+  const clean = "w-clean@example.com";
+  const shaky = "w-shaky@example.com";
+  const stats = {
+    accounts: {
+      [accountSlotTag(clean)]: { imageQuota: 10, successCalls: 3, failCalls: 2, consecutiveFails: 0 },
+      [accountSlotTag(shaky)]: { imageQuota: 10, successCalls: 3, failCalls: 2, consecutiveFails: 1 },
+    },
+  };
+  const order = selectPoolOrder({
+    accounts: [account(shaky), account(clean)],
+    stats,
+    credit: new Map(),
+  });
+  assert.equal(order[0].email, clean);
+  // 没成功过的号不算「干净」：加成本身不能让未验证号插队。
+  const fresh = "w-fresh@example.com";
+  const freshStats = {
+    accounts: {
+      [accountSlotTag(clean)]: { imageQuota: 10, successCalls: 3, consecutiveFails: 0 },
+      [accountSlotTag(fresh)]: { imageQuota: 10, successCalls: 0, failCalls: 0, consecutiveFails: 0 },
+    },
+  };
+  const order2 = selectPoolOrder({
+    accounts: [account(fresh), account(clean)],
+    stats: freshStats,
+    credit: new Map(),
+  });
+  assert.equal(order2[0].email, clean);
+});

@@ -1018,3 +1018,47 @@ test("the hedge lane explores an unproven account instead of the next one in ord
   assert.equal(seen[1], accounts[3].accessToken, "the hedge lane must jump to the explorer");
   assert.equal(result.data.length, 1);
 });
+
+// 上游一个字节都不来 = 这个号卡死了，不该等满单次上限才换号。
+// 实测正常号的首字节是 2.9~4.5 秒，卡死号永远不来；所以给一个远小于单次上限的
+// 判定线，卡死号立刻出局，同样的预算能多试好几个号。
+test("an account that never sends an upstream byte is dropped at the hang threshold", async () => {
+  const accounts = [1, 2, 3].map((n) => ({
+    email: `hang${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `hang${n}@example.com`),
+  }));
+  const seen = [];
+  const results = [];
+  const started = Date.now();
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    maxTotalMs: 5_000,
+    attemptTimeoutMs: 4_000,
+    hangJudgeMs: 100,
+    hedgeDelayMs: 10_000, // 关掉对冲，只验证单路的卡死判定
+    onAccountResult: (e) => { results.push(e); },
+    runWorker: async (payload, opts) => {
+      seen.push(payload.access_token);
+      if (seen.length === 1) {
+        // 卡死：永远不返回、也从不发 first_byte，只等着被 abort。
+        await new Promise((_, reject) => {
+          opts.signal.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          }, { once: true });
+        });
+      }
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  assert.equal(seen.length, 2, "the hung account must be dropped and the next one tried");
+  assert.equal(results[0].errorCode, "worker_timeout");
+  assert.match(results[0].errorMessage, /没有任何响应/);
+  assert.equal(result.data.length, 1);
+  assert(Date.now() - started < 2_000, "the hang must not cost the full attempt timeout");
+});

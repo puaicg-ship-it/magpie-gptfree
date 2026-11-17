@@ -36,10 +36,10 @@
 | `lib/gui-service.mjs` | 面板本地服务（127.0.0.1:37990）：页面 + 会话能力（CSRF，落盘 24h，跨宿主重启不失效）+ 全部 `/api/*`。**0.8.10 起端口冲突会有限次退避重试**（500/1000/2000/3000ms，约 6.5 秒）—— 从面板热更新插件时新旧 host 的端口会短暂重叠，原来只 bind 一次、失败就永久打不开，只能 `docker restart` 救；只有 `EADDRINUSE` 才重试，重试次数写进错误文案由 `index.mjs` 的 warn 带出去。**0.8.11 起新增图片管理接口**：`/api/images`（分页/排序/日期筛选/统计/`namesOnly`）、`/api/images/delete`（单次上限 500）、`/api/images/purge`（早于 N 天）、`/api/images/file`（缩略图透传）。缩略图那条**不校验会话**：`<img>` 发不出自定义请求头，而端口只监听 127.0.0.1，同一批图本来就由 nginx 公开。列表接口同时回 `retention`（保留天数）与 `cleanup`（自动清理时段），两者都带 `source` / `locked`；`listen()` 时还会挂一个 15 分钟的清理定时器（`close()` 里清掉）。**0.8.13 起**：新增 `/api/images/cleanup-log`（读取）与 `/api/images/cleanup-log/clear`（清空）；`/api/stats` 也带上 `imageRetention` / `imageCleanup` —— 设置页是独立 tab，用户可能一次都没进过图片页，不能等 `/api/images` 才拿到这两个值。**0.8.15 起**：新增 `/api/image-errors`（读，`limit` 上限 500）与 `/api/image-errors/clear`（清空），面板设置页的「生图错误日志」用它。 |
 | `lib/image-store.mjs` | **0.8.11 新增**。图片目录的唯一入口：文件名白名单 `^[A-Za-z0-9._-]+\.(png\|jpg\|jpeg\|webp\|gif)$` + `resolve()` 后前缀校验（挡 `../`）、`listImages` 分页与统计、`dailyCounts` 按**本地日期**分桶（用 `getFullYear/getMonth/getDate`，不能用 `toISOString()`，那是 UTC）、`deleteImages` 逐条容错（ENOENT 算成功）、`purgeOlderThanDays`、`pruneOldImages`（每次现读保留天数与清理时段）。目录扫描有 30 秒缓存，删除/落盘后主动失效。**清理时段**：`inCleanupWindow()` 按本地小时判断，`from > to` 视为跨午夜（22→6）；`pruneOldImages` 在时段外直接返回 `{ skipped: true, reason: "window" }`，`force: true` 是手动补跑用的、连时段一起绕过。**另外导出 `startCleanupTimer()`**（15 分钟一跳，`unref()`）——光靠「生图之后顺手清」的话，夜里没人用就永远不会执行，设了时段等于设了个不生效的开关。**0.8.13 起三个删除入口都会写清理日志**：`deleteImages(names, { trigger })` 默认记 `manual-delete`，`purgeOlderThanDays` 传 `trigger: null` 自己记一条带天数的 `manual-purge`（否则会重复两条），`pruneOldImages` 记 `auto`；顺带先 `stat` 出大小再删，返回值多了 `bytes`。日志写完才返回（`appendCleanupLog` 自己吞错），避免「刚删完就看日志」偶发看不到那条。 |
 | `lib/reply-settings.mjs` | **0.8.9 新增，0.8.11 扩展**。回复形态（`imageReply.mode`）、图片保留天数（`imageRetentionDays`，1–90）、清理时段（`imageCleanupWindow`，`{ from, to }` 小时区间，默认 `0-24` 全天）读写 `~/.magpie-gptfree/settings.json`；原子写（tmp + rename，0600）并保留其它键。**环境变量优先于面板设置**，返回值带 `source: env\|settings\|default`，env 压着时面板置灰只读。 |
-| `lib/codex-pool.mjs` | 选号改成**额度加权轮转**（nginx smooth WRR，持久化 credit）+ **熔断**（连续失败指数退避 10min→1h）。判死号排到兜底队列最后。图片路径把失败原因分成"请求的错"和"账号的错"。额度打到 0、上游重置时间过后**自动后台复检**（禁用重新登录，绝不触发 MFA）。**0.8.15 起**生图失败时在 `onAccountResult` 里顺手写一条 `lib/image-error-log.mjs` 的错误日志（`await` 等它写完，一次失败多几毫秒无所谓，但「日志里一定有这条」很重要）。**0.9.0 起账号状态定时巡检**：`startQuotaSweep()` 每 10 分钟挑 2 个「额度快照超过 6 小时」的号问一次额度（只查额度，不登录、不触发 MFA、失败静默）—— 以前只在额度打到 0 且重置时间已过时才复检，池子闲着时快照一直是旧的，而额度加权轮转完全依赖这份快照。 |
+| `lib/codex-pool.mjs` | 选号改成**额度加权轮转**（nginx smooth WRR，持久化 credit）+ **熔断**（连续失败指数退避 10min→1h）。判死号排到兜底队列最后。图片路径把失败原因分成"请求的错"和"账号的错"。额度打到 0、上游重置时间过后**自动后台复检**（禁用重新登录，绝不触发 MFA）。**0.8.15 起**生图失败时在 `onAccountResult` 里顺手写一条 `lib/image-error-log.mjs` 的错误日志（`await` 等它写完，一次失败多几毫秒无所谓，但「日志里一定有这条」很重要）。**0.9.0 起账号状态定时巡检**：`startQuotaSweep()` 每 10 分钟挑 2 个「额度快照超过 6 小时」的号问一次额度（只查额度，不登录、不触发 MFA、失败静默）—— 以前只在额度打到 0 且重置时间已过时才复检，池子闲着时快照一直是旧的，而额度加权轮转完全依赖这份快照。**0.9.0 起权重加「干净号」加成**：出过图、且当前连续失败为 0 的号权重 ×1.5（`CLEAN_ACCOUNT_BONUS`），额度相近时可靠的号排前面 —— 以前额度 25、刚超时两次的号会压过额度 8、连续成功 4 次的号。**同一版新增 `unexploredAccounts()` 与 `hedgeDelayForHead()`**：前者挑出「没成功过、失败 <2 次、额度 >0、有额度快照」的号交给第二路去探（实测 121 个号里 55 个 `lastUsedAt` 全为空，不是坏号是没轮到）；后者按头号可信度决定对冲起步时间（30s / 12s / 有探索任务恒 12s）。 |
 | `lib/pool-stats.mjs` | 健康账本：`consecutiveFails` / `cooldownUntil` / `failSince` / `lastSuccessAt` / `authFails` / `deadAt`。四条判死规则：`auth`（授权连续失败 2 次 —— 生图调用里的 `unauthorized` 和额度检测里的 `mfa_verify_failed_403` 都算，超时/连不上不算）、`never`（一次没成过但失败 ≥15 次）、`stale`（72h 没成功）、`marked`。额度检测成功可复活 `auth` 类死号并清零连续失败。按天账本保留期 14 → **400 天**（约 13 个月，够按年看，也不至于每次记账都重写一个大文件），`history` 改为返回保留期内的全部天，由前端聚合成周/月/年。**0.9.0 起卡死走快车道**：`worker_timeout` 一次按两次失败计、并且立刻冷却 5 分钟（连续两次走正常阶梯，20 分钟起）—— 卡死的号吃掉的是整条 lane 的预算，攒满三次才冷却等于让它连吃三单。 |
 | `lib/pool-connection.mjs` | **0.9.0 起单端点**。整个号池在 Magpie 里只占一条 auth 记录（key 仍是 `gptfree-pool`），标签是「GPTFree号池 (N 个账号)」，**不带 `poolSlot`** —— 以前一个号一条记录（`gptfree-pool#s<hash>`），Magpie 看到 121 个账号，选号和重试都由它做，而它对我们这些号没有任何额度数据（`quotas.json` / `quota-history.json` 里一条都没有），只能盲选 + 串行重试（实测 `tries` 最高 19）。迁移：老的 `gptfree-pool#s*` 在第一次 sync 时清掉；正好处在某次登录 key 作用域里清不掉的记进 `magpie-slots.json`（v2，`{version, legacyKeys}`），下一轮再清。`buildSlotAuthBody` 只为兼容旧脚本保留。 |
-| `lib/chatgpt-web-image.mjs` | **0.9.0 起预算重做（lane + 对冲）**。一条 lane 按额度加权顺序依次试号、失败就换下一个；第一路跑满 `MAGPIE_GPTFREE_HEDGE_DELAY_MS`（默认 25 秒）还没结果就再起第二路并行试另一个号，谁先出图谁赢、其余立刻掐掉。老配置是「单次 35s / 整单 55s / 串行换号」，在数学上走不通：第一个号卡满 35 秒后第二个只剩 20 秒，而正常出图 27~32 秒，于是 121 个号的池子每个请求只试到 1 个（线上 `attempted=1 / skipped=120`）。头程定 25 秒而不是 40 秒，是因为客户端 59 秒就 cancel：40+30 一定超，25 秒起步的第二路还能拿到 30 秒；正常号 27~32 秒返回时第二路才跑 2~7 秒、图还没生成，掐掉几乎不额外烧额度。**超时文案里不许出现「额度」**（Magpie 的失败分类正则含 `额度`，一出现就被标成「额度用尽」，把排查方向带偏过一轮）。额度耗尽的 400 换号而不是整个请求失败；解析「上限将在 21小时 后重置」得到 `retryAfter`。 |
+| `lib/chatgpt-web-image.mjs` | **0.9.0 起预算重做（lane + 对冲）**。一条 lane 按额度加权顺序依次试号、失败就换下一个；第一路跑满 `MAGPIE_GPTFREE_HEDGE_DELAY_MS`（默认 25 秒）还没结果就再起第二路并行试另一个号，谁先出图谁赢、其余立刻掐掉。老配置是「单次 35s / 整单 55s / 串行换号」，在数学上走不通：第一个号卡满 35 秒后第二个只剩 20 秒，而正常出图 27~32 秒，于是 121 个号的池子每个请求只试到 1 个（线上 `attempted=1 / skipped=120`）。头程定 25 秒而不是 40 秒，是因为客户端 59 秒就 cancel：40+30 一定超，25 秒起步的第二路还能拿到 30 秒；正常号 27~32 秒返回时第二路才跑 2~7 秒、图还没生成，掐掉几乎不额外烧额度。**超时文案里不许出现「额度」**（Magpie 的失败分类正则含 `额度`，一出现就被标成「额度用尽」，把排查方向带偏过一轮）。额度耗尽的 400 换号而不是整个请求失败；解析「上限将在 21小时 后重置」得到 `retryAfter`。**同日再调（实测驱动）**：整单 55s → **150s**、单次 40s → **55s**，新增 `HANG_JUDGE_MS`（默认 **10s**）—— 实测 9 次成功请求的上游首字节只要 2.9~4.5 秒，10 秒没动静就是卡死，不必等满单次上限，同样的预算能多试好几个号；第二路改为优先探未验证号（`exploreAccounts`，探索游标与已取集合放在函数作用域，`n>1` 时不会重复试同一个新号），探索路因预算压缩导致的超时不记账号失败。Python worker 在收到上游第一个 SSE 包时往 stderr 写 `##PROGRESS first_byte`，node 侧按行解析（不混进错误文案）。 |
 | `lib/chatgpt-web-text.mjs` | 单次尝试压到 60s 且不超过剩余预算（worker 默认 180s 比整单 120s 还长）；文本选号排除「重新登录都过不去」的号，但**不**套用图片的熔断/额度状态，并用自己的轮转账本，不干扰图片按额度加权。 |
 | `lib/credentials.mjs` | 账号行分隔符从"3 个以上连字符"放宽到 `----` / `---` / `--` 三种，同一文件可混写（邮箱和 Base32 密钥都不含 `-`，所以 `--` 在前三列不会切错）。五字段行仍要求 `----`：JWT 签名里本身可能出现 `--`，用 `--` 切会切坏 token，这种行直接报错而不是悄悄导错。 |
 | `gui/app.js` | 失效徽章区分三种失效原因并给出对应的复活提示；趋势图把生图与文本分开计数，并支持 **按日 / 按周 / 按月 / 按年** 切换（周从周一起算，窗口内没有数据的天也画成空柱），**每根柱顶上直接标「成功数 / 失败数」**，不悬停也能读。**0.8.7 起前端收敛成一条数据流**（一次 `/api/stats` → `renderAll()`），首页把原「我的账号池」和「额度统计」两张表合成一张：账号按状态分六组、可折叠、带搜索/分组/排序，批量栏常驻。Token 徽章是 **`Token 已确认` / `Token 未确认`**（只认上游真实证据：额度检测通过或成功出过图，且晚于最近一次换 Token），额度状态徽章是 **`额度可用` / `已限流` / `冷却到期` / `需先续期` / `额度查询失败` / `额度待检测` / `已失效`**，剩余额度单独一列，徽章里不再重复数字。批量删除的确认框是**自绘**（`confirmAction`）：页面跑在 Magpie 的沙箱 iframe 里（`Origin: null`，没有 `allow-modals`），原生 `confirm()` 会被浏览器直接丢弃并返回 false，表现就是「点了批量删除没反应」。**0.8.13 起导航重排**：「导入账号」不是 tab（它是一次性动作，不是「一直待着看」的视图），挪到导航右侧做成主按钮；tab 收成 总览 / 图片 / 设置，导入页没有 tab 时按钮自带一圈 `is-on` 高亮。号池为空时 `renderEmptyState()` 收起账号表 / 筛选 / 批量栏 / 失效分类，换一张引导卡 —— 否则六个统计数字全是 0，看着像页面坏了。设置页（回复格式 / 保留天数 / 清理时段 / 立即清理 / 清理日志）复用同一份 `imageState`，`/api/stats` 下发即渲染，切过去不用再等请求。 |
@@ -59,16 +59,96 @@ MAGPIE_GPTFREE_IMAGE_RETENTION_DAYS  图片保留天数（1–90），**一般�
 MAGPIE_GPTFREE_IMAGE_CLEANUP_WINDOW  自动清理的时段，**一般不设**：面板「设置 → 自动清理 → 时段」里选即可。
                                   写成 2-6 / 22-6（跨午夜）/ 0-24（全天，默认）。
                                   只管自动清理；面板上的「立即清理」「删除选中」不看它
-MAGPIE_GPTFREE_MAX_TOTAL_MS       单张图的预算（换号重试也算在里面），默认 55000。
+MAGPIE_GPTFREE_MAX_TOTAL_MS       整单预算（一次请求里所有换号重试都算在里面），默认 150000。
                                   注意是**每张图一份**：n>1 是并发打多次，各自计时，不会叠加
-MAGPIE_GPTFREE_GUI_DEBUG          设 1 时输出面板端口重试的调试日志（默认不输出，避免刷屏）
-MAGPIE_GPTFREE_ATTEMPT_TIMEOUT_MS 单次超时，默认 35000
-MAGPIE_GPTFREE_MAX_SLOW_FAILOVERS 慢失败最多换几次号，默认 2
+MAGPIE_GPTFREE_ATTEMPT_TIMEOUT_MS 单个号的上限，默认 55000
+MAGPIE_GPTFREE_HANG_JUDGE_MS      多久没收到上游首字节就判这个号卡死，默认 10000
+MAGPIE_GPTFREE_HEDGE_DELAY_MS     第二路（对冲）起步延迟的兜底值，默认 25000。
+                                  真实调用方会用 hedgeDelayForHead() 覆盖成 12s / 30s，见下文「选号策略」
+MAGPIE_GPTFREE_MAX_LANES          一次请求最多开几路并行，默认 2
 MAGPIE_GPTFREE_TEXT_ATTEMPT_MS    文本单次尝试上限，默认 60000
 MAGPIE_GPTFREE_TZ_OFFSET_MIN      按天统计的时区偏移，默认 -480（UTC+8）
 MAGPIE_GPTFREE_HEALTH_MIN_USABLE  /api/health 判不健康的可用号下限，默认 3
 MAGPIE_GPTFREE_HEALTH_MIN_QUOTA   同上，总剩余额度下限，默认 50
+MAGPIE_GPTFREE_GUI_DEBUG          设 1 时输出面板端口重试的调试日志（默认不输出，避免刷屏）
 ```
+
+## 选号策略（维护者版）
+
+面向用户的说明在 `README.md` 的「号池是怎么挑号的」；这里只记**为什么是这些数字**，
+改之前先看一遍，否则很容易把实测调出来的参数当成随手写的。
+
+### 一次请求的完整链路
+
+```
+selectPoolOrder()            分三档 + 加权排序
+  └─ usable  按 accountWeight() 做 smooth WRR
+  └─ blocked 额度耗尽 / 冷却中
+  └─ dead    auth / never / stale / marked
+        ↓
+executeWebImageGeneration()
+  ├─ lane 1（第一路）      从队首 takeNext()
+  └─ lane 2（第二路/对冲）  12s 或 30s 后起步，优先 takeExplore()
+        ↓
+tryAccount()                 单个号：10s 无首字节 → 判卡死换号；有首字节 → 等到 55s
+```
+
+### 三个关键数字及其依据
+
+| 参数 | 值 | 依据 |
+| --- | --- | --- |
+| `HANG_JUDGE_MS` | 10 秒 | 实测 9 次成功请求的上游首字节是 **2.9~4.5 秒**，10 秒是最大值的两倍多。卡死的号一个字节都不来，以前要等满 55 秒单次上限才敢换 |
+| `MAX_TOTAL_MS` | 150 秒 | 55 秒的依据（「客户端 59 秒 cancel」）不成立：Magpie 等待期间会往 SSE 写 `: keepalive`，流式客户端不会断。55 秒 ÷ 40 秒单次 ≈ 1.4 轮 × 2 路，只够试 2 个号 |
+| `CLEAN_ACCOUNT_BONUS` | 1.5× | 池子里额度 25、刚超时两次的号，权重会压过额度 8、连续成功 4 次的号。1.5 不足以颠倒额度差（额度仍是主导），只在额度相近时把可靠的号提上来 |
+
+### 为什么要「第二路去探未验证号」
+
+`accountWeight` 是 `额度 ÷ (1+2×连续失败)`，额度 25 的号权重是额度 5 的 5 倍。
+实测 121 个号里 **55 个 `lastUsedAt` 全为空** —— 它们额度低（2~5），永远排队尾，
+一次都没上过场；而被反复使用的那批高额度号（额度 10~25）已经有 11 个被上游限流。
+
+这些未验证号的 `planType` / `hasImageLimit` 和已验证号完全一致，不是坏号，是没轮到。
+所以让第二路（本来就是「赌一把」的位置）优先去试它们：赢了白赚一个可用号，输了
+不占第一路的预算。
+
+上线后实测：未派过活 55 → 21，出过图 55 → 64，还探到一个额度只有 2、20.9 秒就
+出图的号（比原来那批 35~51 秒的快得多）。
+
+`unexploredAccounts()` 的三个边界：
+
+- **额度 0 的不探**：肯定出不了图，白烧一个 lane 的 10 秒。
+- **给两次机会**（`failCalls < 2`）：一次超时可能是首次调用要预热或上游抖动。
+  只给一次的话，实测有 23 个号「失败一次就永久出局」。
+- **没有额度快照的不探**：连额度都没探过说明 token 可能根本无效。
+
+### 对冲起步时间为什么不固定
+
+`hedgeDelayForHead()`：
+
+- 头号 24 小时内成功过 → **30 秒**（它大概率只是慢，晚点对冲省额度）
+- 头号没验证过 / 久未成功 → **12 秒**（把 43 秒留给第二路，让它真能出图）
+- **有未验证号要探 → 一律 12 秒**（否则第二路拿不到一次完整的单次预算，
+  探索会变成「预算不够」的假失败）
+
+> 踩过的坑：一开始固定 25 秒起步，但第二路到 150 秒预算末尾只剩 30 秒，比正常
+> 出图（实测 35~51 秒）还短，于是线上 `attempted` 一直停在 1，对冲等于摆设。
+
+### 探索路的失败不能记到账号头上
+
+`tryAccount(idx, signal, { exploring })`：探索路的号如果是因为**预算被压缩**
+（`attemptTimeout < attemptTimeoutMs`）而超时，不写失败记录 —— 那只说明没时间
+试完，不说明这个号不行。否则第一次探索就把新号误判成坏号，探索队列永远长不大。
+
+### 改这些之前请先确认
+
+- 改 `HANG_JUDGE_MS` 前先看 `[gptfree] attempt ttfb=` 日志的首字节分布，
+  这个日志目前在 `tryAccount` 里每次尝试打一行（排查完可以删）。
+- 改 `accountWeight` 的公式要同步跑 `test/selection.test.mjs` 里的
+  「干净号排在刚失败的号前面」用例，那条锁的是「额度相近时可靠优先」。
+- 判死阈值在 `lib/pool-stats.mjs`（`AUTH_FAIL_LIMIT` / `NEVER_WORKED_FAILS` /
+  `DEAD_AFTER_MS`），冷却阶梯是 `FAIL_COOLDOWN_THRESHOLD=3` 起、
+  `10min × 2^(n-3)`、上限 1 小时；`worker_timeout` 额外保底 5 分钟。
+
 
 ## 怎么跑测试
 

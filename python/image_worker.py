@@ -1452,8 +1452,19 @@ class OpenAIWebImageClient:
             watchdog.daemon = True
             watchdog.start()
         timeout_msg = f"Image generation stream exceeded hard timeout of {int(hard_cap_secs)}s"
+        first_payload_seen = False
         try:
             for payload in _iter_sse_payloads(response):
+                # 首个上游数据包到了 —— 说明这个号是活的，只是慢；一个都没到就说明
+                # 上游把连接挂住了。node 侧靠这一行区分「卡死」和「慢」，不用等满
+                # 整个超时才敢换号。走 stderr 是因为 stdout 要留给最终的 JSON。
+                if not first_payload_seen:
+                    first_payload_seen = True
+                    try:
+                        sys.stderr.write("##PROGRESS first_byte\n")
+                        sys.stderr.flush()
+                    except Exception:
+                        pass
                 if payload == "[DONE]":
                     break
                 try:
