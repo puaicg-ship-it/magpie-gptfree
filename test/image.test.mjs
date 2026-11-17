@@ -985,3 +985,36 @@ test("poolFetch image generation updates stats, avoids double-fail on 401 reauth
   assert.equal(sAfterSecond.quotaStats.totalQuota, 3);
   assert.equal(sAfterSecond.quotaStats.totalSuccess, 2);
 });
+
+// 第二路（对冲路）要优先去探「从没被派过活」的号，而不是顺着队列拿下一个。
+// 线上 121 个号里 55 个 `lastUsedAt` 全为空：额度低（2~5）在额度加权轮转里
+// 永远排最后，一次都没上过场。用第二路去探它们，赢了白赚、输了不占第一路预算。
+test("the hedge lane explores an unproven account instead of the next one in order", async () => {
+  const mk = (n) => ({
+    email: `x${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `x${n}@example.com`),
+  });
+  const accounts = [mk(1), mk(2), mk(3), mk(4)];
+  const seen = [];
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    maxTotalMs: 3_000,
+    attemptTimeoutMs: 2_500,
+    hedgeDelayMs: 100,
+    // 只有第 4 个号是「未验证」的：正常顺序它排在最后，第二路应该直接跳过去。
+    exploreAccounts: [accounts[3]],
+    runWorker: async (payload) => {
+      seen.push(payload.access_token);
+      await new Promise((r) => setTimeout(r, seen.length === 1 ? 900 : 60));
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  assert.equal(seen.length, 2);
+  assert.equal(seen[0], accounts[0].accessToken, "the first lane keeps the weighted head");
+  assert.equal(seen[1], accounts[3].accessToken, "the hedge lane must jump to the explorer");
+  assert.equal(result.data.length, 1);
+});

@@ -6,6 +6,7 @@ import {
   refreshExpiredQuotas,
   selectPoolOrder,
   textPoolAccounts,
+  unexploredAccounts,
 } from "../lib/codex-pool.mjs";
 import {
   AUTH_FAIL_LIMIT,
@@ -665,4 +666,48 @@ test("hedge delay depends on whether the head account has a recent success", () 
   // 没有账本、空池子都不能抛错，退回「不信任头号」的保守值。
   assert.equal(hedgeDelayForHead([account(bare)], null, { nowMs: now }), 12_000);
   assert.equal(hedgeDelayForHead([], stats, { nowMs: now }), 12_000);
+});
+
+// 未验证号：没成功过、也几乎没失败过、但额度探过。它们额度低（2~5），在额度加权
+// 轮转里被额度 25 的号压到队尾，永远轮不到 —— 所以专门挑出来交给第二路去探。
+test("unexplored accounts are the ones never dispatched but already quota-checked", () => {
+  const worked = "u-worked@example.com";
+  const failed = "u-failed@example.com";
+  const fresh = "u-fresh@example.com";
+  const noRecord = "u-norecord@example.com";
+  const onceTimedOut = "u-once@example.com";
+  const emptyQuota = "u-empty@example.com";
+  const stats = {
+    accounts: {
+      [accountSlotTag(worked)]: { imageQuota: 20, successCalls: 3, failCalls: 1 },
+      [accountSlotTag(failed)]: { imageQuota: 5, successCalls: 0, failCalls: 2 },
+      // 巡检探过额度，但从没被派过活。
+      [accountSlotTag(fresh)]: { imageQuota: 5, quotaCheckedAt: "2026-11-17T12:00:00Z" },
+      // 只超时过一次：给第二次机会，否则「首次调用要预热」的号会被一次性判死。
+      [accountSlotTag(onceTimedOut)]: { imageQuota: 4, successCalls: 0, failCalls: 1 },
+      // 额度打空：探它纯属白烧一个 lane 的 40 秒。
+      [accountSlotTag(emptyQuota)]: { imageQuota: 0, successCalls: 0, failCalls: 0 },
+    },
+  };
+  const ordered = [worked, failed, fresh, noRecord, onceTimedOut, emptyQuota].map(account);
+  assert.deepEqual(
+    unexploredAccounts(ordered, stats).map((a) => a.email),
+    [fresh, onceTimedOut],
+  );
+  // 没有账本时不能抛错，也不能瞎猜。
+  assert.deepEqual(unexploredAccounts(ordered, null), []);
+  assert.deepEqual(unexploredAccounts([], stats), []);
+});
+
+// 有探索任务时，对冲必须早起步（12 秒），否则第二路拿不到一次完整的单次预算，
+// 探索就变成「预算不够」的假失败。头号再可信也一样。
+test("a pending exploration forces the early hedge even when the head is proven", () => {
+  const head = "u-head@example.com";
+  const now = Date.parse("2026-11-17T12:00:00Z");
+  const stats = { accounts: { [accountSlotTag(head)]: { lastSuccessAt: "2026-11-17T11:59:00Z" } } };
+  assert.equal(hedgeDelayForHead([account(head)], stats, { nowMs: now }), 30_000);
+  assert.equal(
+    hedgeDelayForHead([account(head)], stats, { nowMs: now, hasExplore: true }),
+    12_000,
+  );
 });
