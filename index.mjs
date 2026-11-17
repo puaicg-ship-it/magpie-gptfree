@@ -39,6 +39,72 @@ function slotFromAuth() {
   return "";
 }
 
+/**
+ * 同步结果必须能从容器日志里看见。`ctx.client.app.log` 写的是 Magpie 自己的
+ * 日志面板，`docker logs` 里看不到 —— 0.9.0 首次上线时「记录没写进去」就是
+ * 这样静默了十几分钟。
+ */
+function poolLog(level, message) {
+  const line = `[gptfree] ${message}`;
+  try {
+    if (level === "warn") console.warn(line);
+    else console.log(line);
+  } catch {
+    // 日志失败不能影响主流程。
+  }
+}
+
+async function logToHost(ctx, level, message) {
+  try {
+    await ctx?.client?.app?.log?.({ body: { service: "gptfree", level, message } });
+  } catch {
+    // 同上。
+  }
+}
+
+/** 插件宿主先于 Magpie 主进程启动，第一轮写记录可能扑空；退避重试几轮。 */
+const POOL_SYNC_RETRY_MS = [5000, 20000, 60000, 180000];
+let syncRetrying = false;
+
+async function syncPoolOnce(connection, ctx) {
+  try {
+    const result = await connection.sync();
+    const count = Number(result?.count || 0);
+    if (result?.connected === true) {
+      poolLog("info", `pool endpoint ready: ${POOL_PROVIDER} · ${count} 个账号`);
+      return true;
+    }
+    poolLog("warn", `pool endpoint absent: vault 里没有可用账号（${count}）`);
+    return false;
+  } catch (error) {
+    const message = `pool endpoint sync failed: ${String(error?.message || error)}`;
+    poolLog("warn", message);
+    void logToHost(ctx, "warn", message);
+    return false;
+  }
+}
+
+async function schedulePoolSync(connection, ctx) {
+  if (await syncPoolOnce(connection, ctx)) return;
+  // 两个插件入口都会调这里（GUI 可能因为端口被占而加载失败），退避链只跑一条。
+  if (syncRetrying) return;
+  syncRetrying = true;
+  void (async () => {
+    for (const delay of POOL_SYNC_RETRY_MS) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, delay);
+        timer.unref?.();
+      });
+      if (await syncPoolOnce(connection, ctx)) {
+        syncRetrying = false;
+        return;
+      }
+    }
+    syncRetrying = false;
+    poolLog("warn", `pool endpoint still missing after ${POOL_SYNC_RETRY_MS.length} retries`);
+  })();
+}
+
 export const GPTFreeGuiPlugin = async (ctx, options) => {
   const raw = options?.port ?? GUI_PORT;
   const port = Number(raw);
@@ -66,18 +132,15 @@ export const GPTFreeGuiPlugin = async (ctx, options) => {
       // A log that cannot be written must not stop the plugin from loading.
     }
   }
-  // Restore Magpie's per-account local-pool slots automatically after
-  // restarting. A corrupt vault must not make the GUI inaccessible.
-  try {
-    await connection.sync();
-  } catch {
-    await ctx.client.app.log({
-      body: { service: "gptfree", level: "warn",
-        message: "Could not restore local account-pool state; inspect GUI pool storage" },
-    }).catch(() => {});
-  }
-  return {};
-};
+  // Restore Magpie's single pool endpoint automatically after restarting.
+  // A corrupt vault must not make the GUI inaccessible.
+  //
+  // 这里的重试不是保险丝而是必需品：插件宿主比 Magpie 主进程先起来（线上
+  // 实测宿主 12:10:57 就 bind 了 GUI，主进程 12:11:54 才打印 web 地址），
+  // 在它还没接管 auth 存储时写记录可能失败。失败一次就永远丢整个号池，所以
+  // 退避重试几轮，并把这些结果写进容器日志（app.log 的 warn 不进 stdout）。
+  await schedulePoolSync(connection, ctx);
+  return {};};
 
 /**
  * Separate, multi-account access-token pool mode.
@@ -94,6 +157,9 @@ export const GPTFreePoolPlugin = async (ctx = {}) => {
   } catch {
     // 巡检起不来不能挡住插件加载。
   }
+  // 单端点记录由 GPTFreeGuiPlugin 负责写（端口被占时那个插件也会走到
+  // schedulePoolSync，不会提前 return），这里不重复写：两个入口各持一个
+  // connector 时容易互相覆盖，也没有额外收益。
   return {
     config: async (cfg) => {
       cfg.provider ??= {};

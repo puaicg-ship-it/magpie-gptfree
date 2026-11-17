@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   accountsNeedingQuotaRefresh,
+  hedgeDelayForHead,
   refreshExpiredQuotas,
   selectPoolOrder,
   textPoolAccounts,
@@ -641,4 +642,27 @@ test("an estimated limit start is flagged, and a real observation clears the fla
   await recordQuotaCheck({ email, quota: 0 }, { statsStore: store });
   assert.ok(store.state.accounts[tag].limitedAt);
   assert.equal(store.state.accounts[tag].limitedAtEstimated, false);
+});
+
+// 对冲起步延迟：头号有近期成功记录就晚点对冲（省额度），否则早点对冲（救命）。
+// 线上 121 个号的池子里一半从没出过图，头号卡满 40 秒时第二路只剩 15 秒，
+// 25 秒固定起步的对冲永远赢不了 —— 这条用例锁住这个行为。
+test("hedge delay depends on whether the head account has a recent success", () => {
+  const fresh = "hedge-fresh@example.com";
+  const stale = "hedge-stale@example.com";
+  const bare = "hedge-bare@example.com";
+  const now = Date.parse("2026-11-17T12:00:00Z");
+  const stats = {
+    accounts: {
+      [accountSlotTag(fresh)]: { lastSuccessAt: "2026-11-17T11:30:00Z" },
+      [accountSlotTag(stale)]: { lastSuccessAt: "2026-11-15T11:30:00Z" },
+    },
+  };
+
+  assert.equal(hedgeDelayForHead([account(fresh)], stats, { nowMs: now }), 30_000);
+  assert.equal(hedgeDelayForHead([account(stale)], stats, { nowMs: now }), 12_000);
+  assert.equal(hedgeDelayForHead([account(bare)], stats, { nowMs: now }), 12_000);
+  // 没有账本、空池子都不能抛错，退回「不信任头号」的保守值。
+  assert.equal(hedgeDelayForHead([account(bare)], null, { nowMs: now }), 12_000);
+  assert.equal(hedgeDelayForHead([], stats, { nowMs: now }), 12_000);
 });
