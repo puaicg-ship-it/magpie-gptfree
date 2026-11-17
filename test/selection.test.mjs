@@ -122,6 +122,23 @@ test("three consecutive failures open a cooldown that a success clears", async (
   assert.equal(isAccountCoolingDown(email, store.state), false);
 });
 
+test("a single worker_timeout parks the account for five minutes", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "hang@example.com";
+
+  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  const entry = store.state.accounts[accountSlotTag(email)];
+  // 一次卡死按两次失败计：不用攒到三次才冷却。
+  assert.equal(entry.consecutiveFails, 2);
+  assert(entry.cooldownUntil, "one hang is enough to cool it down");
+  assert.equal(isAccountCoolingDown(email, store.state), true);
+
+  // 普通失败一次不冷却，两次也不冷却 —— 只有卡死有这条快车道。
+  const plain = "plain@example.com";
+  await recordImageCall({ email: plain, success: false, error: "upstream_error" }, { statsStore: store });
+  assert.equal(isAccountCoolingDown(plain, store.state), false);
+});
+
 test("cooldown backs off with the failure streak and is capped at an hour", () => {
   assert.equal(failCooldownMs(1), 0);
   assert.equal(failCooldownMs(2), 0);
@@ -318,6 +335,30 @@ test("only a zero-quota account whose reset time has passed is picked for a quie
   const stale = { email: "needslogin@example.com", accessToken: "not-a-jwt" };
   const staleStats = statsWith({ [stale.email]: { imageQuota: 0, restoreAt: past } });
   assert.equal(accountsNeedingQuotaRefresh([stale], staleStats, { probedAt: new Map() }).length, 0);
+});
+
+test("a stale quota snapshot is re-probed even when it still shows quota left", () => {
+  const live = { email: "stale-snapshot@example.com", accessToken: liveToken() };
+  const fresh = new Date(Date.now() - 60_000).toISOString();
+  const old = new Date(Date.now() - 7 * 3600_000).toISOString();
+  const staleAfterMs = 6 * 3600_000;
+
+  const justChecked = statsWith({ [live.email]: { imageQuota: 12, quotaCheckedAt: fresh } });
+  assert.equal(
+    accountsNeedingQuotaRefresh([live], justChecked, { probedAt: new Map(), staleAfterMs }).length, 0,
+    "a fresh snapshot needs no probe",
+  );
+
+  const staleSnap = statsWith({ [live.email]: { imageQuota: 12, quotaCheckedAt: old } });
+  assert.equal(
+    accountsNeedingQuotaRefresh([live], staleSnap, { probedAt: new Map(), staleAfterMs }).length, 1,
+    "an expired snapshot is re-probed even though it claims 12 left",
+  );
+
+  // 不传 staleAfterMs 时保持老行为：只要还有额度就不探。
+  assert.equal(
+    accountsNeedingQuotaRefresh([live], staleSnap, { probedAt: new Map() }).length, 0,
+  );
 });
 
 test("a dead account is never re-checked automatically, and the probe gap is honoured", () => {

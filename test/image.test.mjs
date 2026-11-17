@@ -691,6 +691,77 @@ test("executeWebImageGeneration stops rotating once maxTotalMs budget is exhaust
   assert.equal(calls, 1);
 });
 
+test("a slow first account no longer blocks the request: the hedge lane wins", async () => {
+  const accounts = [1, 2, 3].map((n) => ({
+    email: `h${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `h${n}@example.com`),
+  }));
+  const seen = [];
+  const started = Date.now();
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    maxTotalMs: 3_000,
+    attemptTimeoutMs: 2_500,
+    hedgeDelayMs: 100,
+    runWorker: async (payload) => {
+      seen.push(payload.access_token);
+      // 第一个号慢（900ms），第二路（对冲）60ms 就回来了。
+      await new Promise((r) => setTimeout(r, seen.length === 1 ? 900 : 60));
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  assert.equal(seen.length, 2, "the hedge lane must pick a different account");
+  assert.notEqual(seen[0], seen[1]);
+  assert.equal(result.data.length, 1);
+  assert(
+    Date.now() - started < 600,
+    "the request must return on the hedge result, not wait for the slow first account",
+  );
+});
+
+test("a client abort surfaces as AbortError, not a 503", async () => {
+  const ctrl = new AbortController();
+  const accounts = [{ email: "gone@example.com", password: "p", totp: seed, accessToken: jwt(3600, "gone@example.com") }];
+  const running = executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    signal: ctrl.signal,
+    reauthenticate: async (a) => a,
+    maxTotalMs: 5_000,
+    runWorker: (_payload, opts) => new Promise((_, reject) => {
+      opts.signal?.addEventListener("abort", () => {
+        reject(Object.assign(new Error("Image generation aborted"), { name: "AbortError" }));
+      }, { once: true });
+    }),
+  });
+  setTimeout(() => ctrl.abort(), 30);
+  await assert.rejects(running, (err) => err.name === "AbortError");
+});
+
+test("the timeout error never mentions quota (Magpie classifies by wording)", async () => {
+  const accounts = [{ email: "slow@example.com", password: "p", totp: seed, accessToken: jwt(3600, "slow@example.com") }];
+  await assert.rejects(
+    executeWebImageGeneration({
+      accounts,
+      request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+      reauthenticate: async (a) => a,
+      maxTotalMs: 400,
+      runWorker: () => new Promise(() => {}),
+    }),
+    (err) => {
+      assert.equal(err.status, 504);
+      assert.match(err.message, /超时/);
+      // Magpie 的失败分类正则里有「额度」，一出现就被标成「额度用尽」。
+      assert.doesNotMatch(err.message, /额度/);
+      return true;
+    },
+  );
+});
+
 test("a quota-exhausted 400 fails over to the next account instead of failing the request", async () => {
   const accounts = [1, 2].map((n) => ({
     email: `q${n}@example.com`,

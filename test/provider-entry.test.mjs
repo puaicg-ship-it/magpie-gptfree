@@ -9,7 +9,7 @@ import { GPTFreePoolPlugin, GPTFreeGuiPlugin } from "../index.mjs";
 import { nativeImportMethod } from "../lib/provider-native-signin.mjs";
 import { pickAccountTxt, NATIVE_PICKER_COMMANDS } from "../lib/native-file-dialog.mjs";
 import {
-  POOL_MARKER, POOL_PROVIDER, accountSlotTag, createPoolConnector, formatAccountSlotLabel,
+  POOL_DISPLAY_NAME, POOL_MARKER, POOL_PROVIDER, accountSlotTag, createPoolConnector, formatAccountSlotLabel,
 } from "../lib/pool-connection.mjs";
 
 const seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -156,8 +156,9 @@ test("native provider chooser starts batch in Magpie host and signs in with non-
     const result = await started.callback();
     assert.equal(result.type, "success");
     assert.equal(result.key, POOL_MARKER);
-    assert.equal(result.metadata.email, accountLabel);
-    assert.equal(result.metadata.poolSlot, slotTag);
+    // 单端点：回调只回池子标签，不回某个账号的遮罩邮箱 / poolSlot。
+    assert.equal(result.metadata.email, POOL_DISPLAY_NAME);
+    assert.equal(result.metadata.poolSlot, undefined);
     assert.deepEqual(claimed, [{ slot: slotTag, key: `${POOL_PROVIDER}#entry0` }]);
     assert(!JSON.stringify(result).includes("password"));
     assert(!JSON.stringify(result).includes("user@example.com"));
@@ -221,8 +222,9 @@ test("native provider multi-account TXT registers every imported account individ
     const started = await method.authorize();
     const result = await started.callback();
     assert.equal(result.type, "success");
-    assert.equal(result.metadata.email, formatAccountSlotLabel(a1));
-    assert.equal(result.metadata.poolSlot, accountSlotTag(a1));
+    // 单端点：登录回调不再冒充「第一个账号」，标签交给随后的 sync() 统一写。
+    assert.equal(result.metadata.email, POOL_DISPLAY_NAME);
+    assert.equal(result.metadata.poolSlot, undefined);
 
     let status;
     for (let i = 0; i < 40; i++) {
@@ -233,13 +235,10 @@ test("native provider multi-account TXT registers every imported account individ
     assert.equal(status.state, "completed");
     assert.equal(status.providerConnected, true);
     assert.equal(status.providerCount, 2);
-    assert.equal(saved.size, 2);
-    assert.equal(saved.get(POOL_PROVIDER).metadata.poolSlot, accountSlotTag(a1));
-    assert.equal(saved.get(`${POOL_PROVIDER}#${accountSlotTag(a2)}`).metadata.poolSlot, accountSlotTag(a2));
-    assert.notEqual(
-      saved.get(POOL_PROVIDER).metadata.email,
-      saved.get(`${POOL_PROVIDER}#${accountSlotTag(a2)}`).metadata.email,
-    );
+    // 两个号只对应 Magpie 里的一条记录。
+    assert.equal(saved.size, 1);
+    assert.equal(saved.get(POOL_PROVIDER).metadata.poolAccounts, 2);
+    assert.equal(saved.get(POOL_PROVIDER).metadata.poolSlot, undefined);
   } finally { await h.close(); await file.close(); }
 });
 

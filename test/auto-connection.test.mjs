@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  accountSlotTag, createPoolConnector, formatAccountSlotLabel,
-  POOL_PROVIDER, POOL_MARKER,
+  accountSlotTag, createPoolConnector, formatPoolAccountLabel,
+  POOL_PROVIDER, POOL_MARKER, POOL_DISPLAY_NAME,
 } from "../lib/pool-connection.mjs";
 import { GPTFreePoolPlugin } from "../index.mjs";
 
@@ -47,39 +47,30 @@ test("empty local pool has no provider sign-in and multi-account oauth is enable
   assert.equal(plugin.auth.methods[0].type, "oauth");
 });
 
-test("multi-account pool registers every account individually with unique masked labels and zero secrets", async () => {
+test("single endpoint: the whole pool is one Magpie account row carrying the pool label", async () => {
   const h = host();
   let rows = [entry];
-  const connect = createPoolConnector(h.client, { poolRead: async () => rows });
+  const connect = createPoolConnector(h.client, { poolRead: async () => rows, slotsFile: false });
   const first = await connect.sync();
   assert.equal(first.connected, true);
   assert.equal(first.count, 1);
   assert.equal(h.saved.size, 1);
   assert.equal(h.saved.get(POOL_PROVIDER).key, POOL_MARKER);
-  assert.equal(h.saved.get(POOL_PROVIDER).accountId, formatAccountSlotLabel(entry.email));
-  assert.equal(h.saved.get(POOL_PROVIDER).metadata.email, formatAccountSlotLabel(entry.email));
-  assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolSlot, accountSlotTag(entry.email));
+  assert.equal(h.saved.get(POOL_PROVIDER).accountId, POOL_DISPLAY_NAME);
+  assert.equal(h.saved.get(POOL_PROVIDER).metadata.email, POOL_DISPLAY_NAME);
+  // 单端点下没有「钉哪个号」这回事：poolSlot 必须不存在，否则旧逻辑会把
+  // 一个早就不行的号永远排在第一。
+  assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolSlot, undefined);
 
-  // Notice entry and entry2 share the same masked prefix ("ex***@example.com")
-  // yet still produce distinct labels & poolSlot tags so Magpie settle() never collapses them.
   rows = [entry, entry2, entry3];
   const multi = await connect.sync();
   assert.equal(multi.connected, true);
   assert.equal(multi.count, 3);
-  assert.equal(h.saved.size, 3);
-
-  const key2 = `${POOL_PROVIDER}#${accountSlotTag(entry2.email)}`;
-  const key3 = `${POOL_PROVIDER}#${accountSlotTag(entry3.email)}`;
-  assert.equal(h.saved.has(POOL_PROVIDER), true);
-  assert.equal(h.saved.has(key2), true);
-  assert.equal(h.saved.has(key3), true);
-
-  const labels = [...h.saved.values()].map((v) => v.accountId);
-  const emails = [...h.saved.values()].map((v) => v.metadata.email);
-  const slots = [...h.saved.values()].map((v) => v.metadata.poolSlot);
-  assert.equal(new Set(labels).size, 3);
-  assert.deepEqual(labels, emails);
-  assert.equal(new Set(slots).size, 3);
+  // 关键：3 个号仍然是 1 条记录，不再一个号一条。
+  assert.equal(h.saved.size, 1);
+  assert.equal(h.saved.get(POOL_PROVIDER).accountId, formatPoolAccountLabel(3));
+  assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolAccounts, 3);
+  assert.deepEqual(multi.accounts, [{ key: POOL_PROVIDER, label: formatPoolAccountLabel(3) }]);
 
   const dumped = JSON.stringify([...h.saved]);
   for (const item of rows) {
@@ -89,92 +80,87 @@ test("multi-account pool registers every account individually with unique masked
   }
 
   const plugin = await GPTFreePoolPlugin(h);
-  const opts = await plugin.auth.loader(async () => h.saved.get(key2));
+  const opts = await plugin.auth.loader(async () => h.saved.get(POOL_PROVIDER));
   assert.equal(opts.apiKey, POOL_MARKER);
 });
 
-test("partial and full account removal prunes only deleted Magpie account keys", async () => {
-  const h = host();
-  let rows = [entry, entry2];
-  const connect = createPoolConnector(h.client, { poolRead: async () => rows });
-  await connect.sync();
-  const key2 = `${POOL_PROVIDER}#${accountSlotTag(entry2.email)}`;
-  assert.equal(h.saved.has(POOL_PROVIDER), true);
-  assert.equal(h.saved.has(key2), true);
-
-  rows = [entry2];
-  const partial = await connect.sync();
-  assert.equal(partial.connected, true);
-  assert.equal(partial.count, 1);
-  assert.equal(h.saved.has(POOL_PROVIDER), false);
-  assert.equal(h.saved.has(key2), true);
-
-  rows = [];
-  const empty = await connect.sync();
-  assert.equal(empty.connected, false);
-  assert.equal(empty.count, 0);
-  assert.equal(h.saved.size, 0);
-});
-
-test("AsyncLocalStorage snapshot & claimKey prevent Magpie keyFor() scope redirection across accounts", async () => {
-  const h = host();
-  let rows = [entry];
-  const connect = createPoolConnector(h.client, {
-    poolRead: async () => rows,
-    getActiveKey: () => h.magpie.account(POOL_PROVIDER) || "",
-  });
-  await connect.sync();
-  assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolSlot, accountSlotTag(entry.email));
-
-  // Trigger sync from inside an active scoped sign-in for entry2 on "gptfree-pool#custom2".
-  rows = [entry, entry2, entry3];
-  await h.scope.run({ provider: POOL_PROVIDER, key: `${POOL_PROVIDER}#custom2` }, async () => {
-    connect.claimKey(entry2.email, `${POOL_PROVIDER}#custom2`);
-    const res = await connect.sync();
-    assert.equal(res.count, 3);
-  });
-
-  // Bare key still belongs to entry and wasn't overwritten with entry2, while custom2 got entry2 and entry3 got #slot3!
-  assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolSlot, accountSlotTag(entry.email));
-  assert.equal(h.saved.get(`${POOL_PROVIDER}#custom2`).metadata.poolSlot, accountSlotTag(entry2.email));
-  assert.equal(h.saved.get(`${POOL_PROVIDER}#${accountSlotTag(entry3.email)}`).metadata.poolSlot, accountSlotTag(entry3.email));
-
-  // Removing entry while still inside custom2 scope defers removing bare key rather than redirecting to custom2.
-  rows = [entry2, entry3];
-  await h.scope.run({ provider: POOL_PROVIDER, key: `${POOL_PROVIDER}#custom2` }, async () => {
-    await connect.sync();
-  });
-  assert.equal(h.saved.has(POOL_PROVIDER), true);
-  assert.equal(h.saved.has(`${POOL_PROVIDER}#custom2`), true);
-
-  // Once outside scope, deferred cleanup removes bare POOL_PROVIDER without touching custom2 or entry3.
-  await connect.sync();
-  assert.equal(h.saved.has(POOL_PROVIDER), false);
-  assert.equal(h.saved.has(`${POOL_PROVIDER}#custom2`), true);
-  assert.equal(h.saved.has(`${POOL_PROVIDER}#${accountSlotTag(entry3.email)}`), true);
-});
-
-test("slotsFile persists non-secret slot-to-key mappings across restarts", async () => {
+test("legacy per-account rows are pruned and the pool collapses to one row", async () => {
   const dir = await mkdtemp(join(tmpdir(), "magpie-slots-test-"));
   const slotsFile = join(dir, "magpie-slots.json");
+  const legacy2 = `${POOL_PROVIDER}#${accountSlotTag(entry2.email)}`;
   try {
+    // v1 的槽位表 + Magpie 里已经存在的两条老记录
+    await writeFile(slotsFile, JSON.stringify({
+      version: 1,
+      slots: {
+        [accountSlotTag(entry.email)]: POOL_PROVIDER,
+        [accountSlotTag(entry2.email)]: legacy2,
+      },
+    }));
     const h = host();
-    const rows = [entry, entry2];
-    const c1 = createPoolConnector(h.client, { poolRead: async () => rows, slotsFile });
-    c1.claimKey(entry.email, `${POOL_PROVIDER}#customA`);
-    await c1.sync();
-    const onDisk = await readFile(slotsFile, "utf8");
-    assert(!onDisk.includes(entry.email));
-    assert(!onDisk.includes(entry.password));
-    assert(!onDisk.includes(entry.accessToken));
-    const parsed = JSON.parse(onDisk);
-    assert.equal(parsed.slots[accountSlotTag(entry.email)], `${POOL_PROVIDER}#customA`);
+    h.saved.set(POOL_PROVIDER, { type: "api", key: POOL_MARKER, accountId: "stale label" });
+    h.saved.set(legacy2, { type: "api", key: POOL_MARKER, accountId: "stale label 2" });
 
-    const h2 = host();
-    const c2 = createPoolConnector(h2.client, { poolRead: async () => rows, slotsFile });
-    const res = await c2.sync();
-    assert.equal(res.count, 2);
-    assert.equal(h2.saved.has(`${POOL_PROVIDER}#customA`), true);
+    const connect = createPoolConnector(h.client, {
+      poolRead: async () => [entry, entry2],
+      slotsFile,
+    });
+    await connect.sync();
+
+    assert.equal(h.saved.size, 1);
+    assert.equal(h.saved.has(legacy2), false);
+    assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolAccounts, 2);
+
+    const parsed = JSON.parse(await readFile(slotsFile, "utf8"));
+    assert.equal(parsed.version, 2);
+    assert.deepEqual(parsed.legacyKeys, []);
+    assert(!JSON.stringify(parsed).includes(entry.email));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a legacy key Magpie is currently signing in under is deferred to the next sync", async () => {
+  const legacy = `${POOL_PROVIDER}#custom2`;
+  const h = host();
+  h.saved.set(legacy, { type: "api", key: POOL_MARKER, accountId: "custom2" });
+  const connect = createPoolConnector(h.client, {
+    poolRead: async () => [entry],
+    slotsFile: false,
+    getActiveKey: () => h.magpie.account(POOL_PROVIDER) || "",
+  });
+
+  // 正在用 custom2 这条 key 登录时，不能把它自己删掉 —— 会打断这次登录。
+  await h.scope.run({ provider: POOL_PROVIDER, key: legacy }, async () => {
+    connect.claimKey(entry.email, legacy);
+    await connect.sync();
+  });
+  assert.equal(h.saved.has(legacy), true);
+  // 但池子那一条已经在（runOutside 逃开了 keyFor() 的作用域重定向，
+  // 否则这次 set 会被写到 custom2 上）。
+  assert.equal(h.saved.get(POOL_PROVIDER).metadata.poolAccounts, 1);
+
+  // 离开作用域后下一次 sync 清掉。
+  await connect.sync();
+  assert.equal(h.saved.has(legacy), false);
+  assert.equal(h.saved.size, 1);
+});
+
+test("pending legacy keys survive a restart and are cleaned on the next sync", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "magpie-slots-test-"));
+  const slotsFile = join(dir, "magpie-slots.json");
+  const legacy = `${POOL_PROVIDER}#${accountSlotTag(entry3.email)}`;
+  try {
+    await writeFile(slotsFile, JSON.stringify({ version: 2, legacyKeys: [legacy] }));
+    const h = host();
+    h.saved.set(legacy, { type: "api", key: POOL_MARKER });
+    const connect = createPoolConnector(h.client, { poolRead: async () => [entry], slotsFile });
+    const res = await connect.sync();
+    assert.equal(res.count, 1);
+    assert.equal(h.saved.has(legacy), false);
+    assert.equal(h.saved.size, 1);
+    const parsed = JSON.parse(await readFile(slotsFile, "utf8"));
+    assert.deepEqual(parsed.legacyKeys, []);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
