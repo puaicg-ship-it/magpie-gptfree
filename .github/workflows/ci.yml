@@ -27,5 +27,7 @@ jobs:
         run: |
           python -m compileall -q python
           python python/auth_worker.py <<< '{"action":"not-authenticate"}' | grep -q '"invalid_input"'
+      - name: Python worker unit tests (no real accounts)
+        run: python -m unittest discover -s python -p "test_*.py"
       - name: Unit tests (no real accounts)
         run: npm test

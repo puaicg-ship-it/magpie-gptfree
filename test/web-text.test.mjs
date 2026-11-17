@@ -292,3 +292,31 @@ test("a single text attempt is bounded by the remaining budget, not the worker d
   assert.ok(seen[0] <= 60_000, "不能是 worker 默认的 180 秒");
   assert.ok(seen[0] >= 5_000, "也别压到短得没法用");
 });
+
+// 上游说「你发的 body 我不认」时，422 必须原样到客户端 —— 既不能吞成 503
+// （那会让人以为是号池没号），也不能把 worker 那句能定位的文案截掉。
+test("upstream 422 passes through as 422 with the locating message intact", async () => {
+  clearTextCooldowns();
+  const tok = platformJwt(3600, "rejected@example.com");
+  const workerMessage =
+    '上游 422：{"detail": "Invalid conversation body"}（/f/conversation｜model=gpt-5.6-luna｜角色=user｜1 条消息）';
+
+  const res = await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    [{ email: "rejected@example.com", accessToken: tok }],
+    {
+      worker: async () => ({
+        ok: false,
+        http_status: 422,
+        error_code: "upstream_http_error",
+        error: workerMessage,
+      }),
+    },
+  );
+
+  assert.equal(res.status, 422);
+  const body = await res.json();
+  assert.equal(body.error.code, "upstream_http_error");
+  assert.equal(body.error.message, workerMessage);
+  assert.match(body.error.message, /Invalid conversation body/);
+});

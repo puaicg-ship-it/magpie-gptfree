@@ -120,6 +120,179 @@ def normalize_web_messages(
     return web_messages, assistant_history, last_user_text, input_message_ids
 
 
+def web_message_text(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    if not isinstance(content, dict):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return ""
+    return str(parts[0] or "")
+
+
+def _web_message_role(message: Dict[str, Any]) -> str:
+    author = message.get("author")
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("role") or "").strip().lower()
+
+
+def _new_web_message(role: str, text: str) -> Dict[str, Any]:
+    return {
+        "id": str(uuid.uuid4()),
+        "author": {"role": role},
+        "create_time": time.time(),
+        "content": {"content_type": "text", "parts": [text]},
+        "metadata": {
+            "developer_mode_connector_ids": [],
+            "selected_github_repos": [],
+            "selected_all_github_repos": False,
+            "serialization_metadata": {"custom_symbol_offsets": []},
+        },
+    }
+
+
+def fold_system_messages(web_messages: Sequence[Dict[str, Any]]) -> tuple[list[Dict[str, Any]], int]:
+    """把 system 角色合并进第一条 user 消息，返回 (新消息列表, 合并了几条)。
+
+    为什么需要：ChatGPT Web 的 conversation body 只认 user / assistant —— 图片链路
+    一直只发一条 user 消息，从来没撞上这个问题；文本链路会把客户端给的 system /
+    developer 原样搬进 `messages[].author.role`。agent 类客户端（PI Agent 这种）
+    几乎一定带 system prompt，上游就可能整单回 422「Invalid conversation body」，
+    而且只回这一句，看不出是哪个字段。
+
+    合并是最不坏的降级：语义还在（从「系统指令」变成「用户交代的前置说明」），
+    但不会因为一个角色名把整单打死。只在上游真的拒绝请求体（400/422）时才会用到，
+    正常请求一次就成，不会因为多准备一套 body 而变慢。
+
+    返回的是副本，调用方的 web_messages 不会被改。
+    """
+    system_texts: list[str] = []
+    kept: list[Dict[str, Any]] = []
+    for message in web_messages:
+        if _web_message_role(message) == "system":
+            text = web_message_text(message).strip()
+            if text:
+                system_texts.append(text)
+            continue
+        kept.append(message)
+    if not system_texts:
+        return list(web_messages), 0
+
+    prefix = "\n\n".join(system_texts)
+    folded = [json.loads(json.dumps(m)) for m in kept]
+    first_user = next((m for m in folded if _web_message_role(m) == "user"), None)
+    if first_user is None:
+        # 只有 system + assistant 历史：合并后的说明本身就得当一条 user 消息发出去，
+        # 否则整单没有 user turn，上游同样不认。
+        folded.insert(0, _new_web_message("user", prefix))
+    else:
+        existing = web_message_text(first_user).strip()
+        first_user["content"] = {
+            "content_type": "text",
+            "parts": [f"{prefix}\n\n{existing}" if existing else prefix],
+        }
+    return folded, len(system_texts)
+
+
+def describe_conversation_body(
+    web_messages: Sequence[Dict[str, Any]],
+    *,
+    model: str,
+    effort: str,
+) -> str:
+    """一句话描述「我们发出去的 body」，塞进上游错误的 hint。
+
+    上游只回一句 Invalid conversation body 的时候，这句话就是全部线索 ——
+    得让人一眼看出：发的哪个模型、带了哪些角色、有没有 thinking_effort。
+    """
+    roles: list[str] = []
+    for message in web_messages:
+        role = _web_message_role(message) or "?"
+        if not roles or roles[-1] != role:
+            roles.append(role)
+    bits = [f"model={model}", f"角色={'/'.join(roles) or '无'}", f"{len(web_messages)} 条消息"]
+    if effort:
+        bits.append(f"effort={effort}")
+    return "｜".join(bits)
+
+
+def build_conversation_body(
+    web_messages: Sequence[Dict[str, Any]],
+    *,
+    upstream_model: str,
+    effort: str,
+    timezone_offset_min: int,
+    timezone_name: str,
+) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "action": "next",
+        "messages": list(web_messages),
+        "parent_message_id": "client-created-root",
+        "model": upstream_model,
+        "client_prepare_state": "sent",
+        "timezone_offset_min": int(timezone_offset_min),
+        "timezone": timezone_name,
+        "history_and_training_disabled": True,
+        "conversation_mode": {"kind": "primary_assistant"},
+        "enable_message_followups": True,
+        "system_hints": [],
+        "supports_buffering": True,
+        "supported_encodings": ["v1"],
+        "client_contextual_info": {
+            "is_dark_mode": False,
+            "time_since_loaded": 25,
+            "page_height": 900,
+            "page_width": 1200,
+            "pixel_ratio": 1,
+            "screen_height": 1080,
+            "screen_width": 1920,
+            "app_name": "chatgpt.com",
+        },
+        "paragen_cot_summary_display_override": "allow",
+        "force_parallel_switch": "auto",
+    }
+    if effort:
+        body["thinking_effort"] = effort
+    return body
+
+
+def conversation_body_variants(
+    web_messages: Sequence[Dict[str, Any]],
+    *,
+    effort: str,
+) -> list[tuple[list[Dict[str, Any]], str, str]]:
+    """按「最保守的降级顺序」给出要试的 body 形态：[(messages, effort, 说明)]。
+
+    第一项永远是原样的请求 —— 现在能跑通的客户端不该因为这次改动多付出任何代价，
+    只有上游 400/422 拒绝请求体时才往下试。
+    """
+    folded_messages, folded_count = fold_system_messages(web_messages)
+    variants: list[tuple[list[Dict[str, Any]], str, str]] = [
+        (list(web_messages), effort, "原始"),
+    ]
+    if folded_count:
+        variants.append((folded_messages, effort, "system 折进 user"))
+        if effort:
+            variants.append((folded_messages, "", "system 折进 user + 去 effort"))
+    elif effort:
+        variants.append((list(web_messages), "", "去 effort"))
+    return variants
+
+
+def ensure_ok_with_hint(response: Any, context: str, hint: str) -> None:
+    """_ensure_ok 的薄包装：把「我们发了什么」挂到异常上再抛。
+
+    不去改 image_worker 里的 UpstreamHTTPError —— 生图链路一行都不动。hint 只是
+    文本链路自己的补充说明，_error_response_dict 用 getattr 读，没有也不影响。
+    """
+    try:
+        OpenAIWebImageClient._ensure_ok(response, context)
+    except UpstreamHTTPError as exc:
+        exc.hint = hint
+        raise
+
+
 def strip_history_prefix(
     text: str,
     assistant_history_messages: Sequence[str],
@@ -454,15 +627,17 @@ class OpenAIWebTextClient(OpenAIWebImageClient):
                 json=payload,
                 timeout=60,
             )
-            if (
-                attempt == 0
-                and current_effort
-                and response.status_code in (400, 422)
-                and "thinking_effort" in str(getattr(response, "text", "") or "").lower()
-            ):
+            if attempt == 0 and current_effort and response.status_code in (400, 422):
+                # 原来还要求响应体里出现 "thinking_effort" 才重试，可上游常常只回一句
+                # 「Invalid conversation body」—— 那个条件永远不会成立，等于没写。
+                # 这一轮带了 effort 就先当它的锅，去掉再来一次。
                 current_effort = ""
                 continue
-            self._ensure_ok(response, path)
+            ensure_ok_with_hint(
+                response,
+                path,
+                f"model={upstream_model}｜prepare｜effort={current_effort or '无'}",
+            )
             data = response.json() if hasattr(response, "json") else {}
             return str((data or {}).get("conduit_token") or ""), current_effort
 
@@ -500,38 +675,24 @@ class OpenAIWebTextClient(OpenAIWebImageClient):
             assistant_history_messages=tuple(assistant_history),
             input_message_ids=frozenset(input_ids),
         )
+        variants = conversation_body_variants(web_messages, effort=effort)
+        tried: list[str] = []
         resp = None
 
-        for attempt in range(2):
-            body: Dict[str, Any] = {
-                "action": "next",
-                "messages": web_messages,
-                "parent_message_id": "client-created-root",
-                "model": upstream_model,
-                "client_prepare_state": "sent",
-                "timezone_offset_min": int(timezone_offset_min),
-                "timezone": timezone_name,
-                "history_and_training_disabled": True,
-                "conversation_mode": {"kind": "primary_assistant"},
-                "enable_message_followups": True,
-                "system_hints": [],
-                "supports_buffering": True,
-                "supported_encodings": ["v1"],
-                "client_contextual_info": {
-                    "is_dark_mode": False,
-                    "time_since_loaded": 25,
-                    "page_height": 900,
-                    "page_width": 1200,
-                    "pixel_ratio": 1,
-                    "screen_height": 1080,
-                    "screen_width": 1920,
-                    "app_name": "chatgpt.com",
-                },
-                "paragen_cot_summary_display_override": "allow",
-                "force_parallel_switch": "auto",
-            }
-            if effort:
-                body["thinking_effort"] = effort
+        for index, (variant_messages, variant_effort, label) in enumerate(variants):
+            tried.append(label)
+            body = build_conversation_body(
+                variant_messages,
+                upstream_model=upstream_model,
+                effort=variant_effort,
+                timezone_offset_min=timezone_offset_min,
+                timezone_name=timezone_name,
+            )
+            hint = describe_conversation_body(
+                variant_messages,
+                model=upstream_model,
+                effort=variant_effort,
+            )
 
             candidate = self.session.post(
                 self.base_url + path,
@@ -545,21 +706,28 @@ class OpenAIWebTextClient(OpenAIWebImageClient):
                 timeout=stream_timeout,
                 stream=True,
             )
-            if (
-                attempt == 0
-                and effort
-                and candidate.status_code in (400, 422)
-                and "thinking_effort" in str(getattr(candidate, "text", "") or "").lower()
-            ):
-                candidate.close()
-                effort = ""
+            try:
+                ensure_ok_with_hint(candidate, path, hint)
+            except UpstreamHTTPError as exc:
+                try:
+                    candidate.close()
+                except Exception:
+                    pass
+                # 只有「上游拒绝请求体」（400/422）才值得换一套 body 重来：5xx、限流、
+                # token 失效跟 body 长什么样无关，重试只是白等一轮。
+                is_last = index == len(variants) - 1
+                if int(getattr(exc, "status_code", 0) or 0) not in (400, 422) or is_last:
+                    if is_last and len(tried) > 1:
+                        # 降级全试完了还是不行：把试过哪几种形态一并带上，否则下一个人
+                        # 只能看到「最后一次最朴素的 body 被拒」，反而更难定位。
+                        exc.hint = f"{hint}｜已试：{'→'.join(tried)}"
+                    raise
                 continue
             resp = candidate
             break
 
         assert resp is not None
         try:
-            self._ensure_ok(resp, path)
             for payload in _iter_sse_payloads(resp):
                 if payload == "[DONE]":
                     break
@@ -597,10 +765,67 @@ def _emit_ndjson(event: Dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+_SANITIZE_EMPTY_FALLBACK = "Image generation failed"
+
+
+def upstream_body_text(body: Any) -> str:
+    """上游原文：dict / list 用 JSON 表示，不要用 Python 的 repr。
+
+    `str({"detail": "Invalid conversation body"})` 得到的是
+    `{'detail': 'Invalid conversation body'}` —— 单引号、看着像内部调试信息，
+    用户把这句话贴到 issue 里，没人认得出这是上游的 HTTP 响应体。JSON 既忠实
+    又可读，和上游实际返回的东西一致。
+    """
+    if isinstance(body, (dict, list)):
+        try:
+            return json.dumps(body, ensure_ascii=False)
+        except Exception:
+            return str(body)
+    return str(body or "")
+
+
+def _short_context(context: str) -> str:
+    """把上游路径缩成一眼能读的形态：/backend-api/f/conversation → /f/conversation。"""
+    text = str(context or "").strip()
+    if not text:
+        return ""
+    return text[len("/backend-api"):] if text.startswith("/backend-api") else text
+
+
+def _upstream_error_message(exc: "UpstreamHTTPError") -> str:
+    """把上游错误拼成一句人话，顺序是「状态 → 上游原文 → 我们发了什么」。
+
+    原文必须紧跟状态码：Node 层还会再脱敏并截到 180 字，放后面的信息会被切掉，
+    而原文恰恰是唯一能说明「上游到底在抱怨什么」的东西。
+    """
+    raw = _sanitize_error_text(upstream_body_text(exc.body))
+    if raw == _SANITIZE_EMPTY_FALLBACK:
+        raw = ""
+
+    bits: list[str] = []
+    where = _short_context(getattr(exc, "context", ""))
+    if where:
+        bits.append(where)
+    hint = _sanitize_error_text(getattr(exc, "hint", "") or "")
+    if hint and hint != _SANITIZE_EMPTY_FALLBACK:
+        bits.append(hint)
+
+    status = int(getattr(exc, "status_code", 0) or 0)
+    if raw:
+        msg = f"上游 {status}：{raw}"
+    else:
+        msg = f"上游 {status}"
+    if bits:
+        msg += f"（{'｜'.join(bits)}）"
+    return msg
+
+
 def _error_response_dict(exc: Exception) -> Dict[str, Any]:
     if isinstance(exc, UpstreamHTTPError):
-        body_text = _sanitize_error_text(str(exc.body))
-        msg = body_text or _sanitize_error_text(str(exc)) or f"Upstream HTTP {exc.status_code}"
+        body_text = _sanitize_error_text(upstream_body_text(exc.body))
+        if body_text == _SANITIZE_EMPTY_FALLBACK:
+            body_text = ""
+        msg = _upstream_error_message(exc)
         token_invalid = exc.status_code == 401 or _is_token_invalid_text(body_text or str(exc))
         if token_invalid and exc.status_code in (200, 403):
             status = 401

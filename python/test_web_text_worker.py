@@ -290,6 +290,156 @@ class WebTextWorkerTests(unittest.TestCase):
             tracker.feed_payload(json.dumps({"error": {"code": "usage_limit", "message": "Too many requests"}}))
         self.assertEqual(ctx.exception.http_status, 429)
 
+    # ---- 422「Invalid conversation body」：换形态重试 + 报错能定位 ----
+
+    @staticmethod
+    def _web_handler(on_conversation):
+        """bootstrap / sentinel / prepare 一律放行，只把 /f/conversation 交给回调。"""
+
+        def handler(method: str, url: str, kwargs: dict):
+            if method == "GET" and url == "https://chatgpt.com/":
+                return FakeResponse(status_code=200, cookies={"oai-did": "did-1"})
+            if url.endswith("/backend-api/sentinel/chat-requirements/prepare"):
+                return FakeResponse(status_code=200, json_data={"prepare_token": "prep-1"})
+            if url.endswith("/backend-api/sentinel/chat-requirements/finalize"):
+                return FakeResponse(status_code=200, json_data={"token": "req-tok-1"})
+            if url.endswith("/backend-api/f/conversation/prepare"):
+                return FakeResponse(status_code=200, json_data={"conduit_token": "conduit-abc"})
+            if url.endswith("/backend-api/f/conversation"):
+                return on_conversation(kwargs.get("json") or {})
+            raise AssertionError(f"Unexpected call: {method} {url}")
+
+        return handler
+
+    @staticmethod
+    def _ok_lines(text: str) -> list[bytes]:
+        return _sse_lines([
+            "v1",
+            {
+                "v": {
+                    "message": {
+                        "id": "m1",
+                        "author": {"role": "assistant"},
+                        "content": {"content_type": "text", "parts": [""]},
+                    },
+                    "conversation_id": "conv-web-1",
+                }
+            },
+            {"o": "patch", "v": [{"p": "/message/content/parts/0", "o": "append", "v": text}]},
+            "[DONE]",
+        ])
+
+    def test_422_on_system_role_folds_it_into_first_user_message(self) -> None:
+        conv_calls: list[dict] = []
+
+        def on_conversation(body: dict):
+            conv_calls.append(body)
+            roles = [m["author"]["role"] for m in body["messages"]]
+            if "system" in roles:
+                return FakeResponse(status_code=422, json_data={"detail": "Invalid conversation body"})
+            return FakeResponse(status_code=200, lines=self._ok_lines("Folded"))
+
+        res = web_text_worker.handle_text_payload(
+            {
+                "access_token": "tok-1",
+                "model": "gpt-5.6-luna",
+                "messages": [
+                    {"role": "developer", "content": "You are terse."},
+                    {"role": "user", "content": "Greet me"},
+                ],
+            },
+            session=FakeSession(self._web_handler(on_conversation)),
+        )
+
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["text"], "Folded")
+        self.assertEqual(len(conv_calls), 2)
+        self.assertEqual([m["author"]["role"] for m in conv_calls[0]["messages"]], ["system", "user"])
+        self.assertEqual([m["author"]["role"] for m in conv_calls[1]["messages"]], ["user"])
+        # 语义不能丢：system 的内容变成第一条 user 消息的前缀
+        self.assertEqual(
+            conv_calls[1]["messages"][0]["content"]["parts"][0],
+            "You are terse.\n\nGreet me",
+        )
+
+    def test_422_retries_without_effort_even_when_upstream_does_not_name_it(self) -> None:
+        conv_calls: list[dict] = []
+
+        def on_conversation(body: dict):
+            conv_calls.append(body)
+            if "thinking_effort" in body:
+                # 上游只回这一句，从不提 thinking_effort —— 旧的「看关键字才重试」永远不触发
+                return FakeResponse(status_code=422, json_data={"detail": "Invalid conversation body"})
+            return FakeResponse(status_code=200, lines=self._ok_lines("NoEffort"))
+
+        res = web_text_worker.handle_text_payload(
+            {
+                "access_token": "tok-1",
+                "model": "gpt-5.6-terra",
+                "thinking_effort": "high",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            session=FakeSession(self._web_handler(on_conversation)),
+        )
+
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(len(conv_calls), 2)
+        self.assertEqual(conv_calls[0].get("thinking_effort"), "high")
+        self.assertNotIn("thinking_effort", conv_calls[1])
+
+    def test_422_after_every_variant_reports_where_and_what_we_sent(self) -> None:
+        def on_conversation(_body: dict):
+            return FakeResponse(status_code=422, json_data={"detail": "Invalid conversation body"})
+
+        res = web_text_worker.handle_text_payload(
+            {
+                "access_token": "tok-1",
+                "model": "gpt-5.6-luna",
+                "thinking_effort": "high",
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "hi"},
+                ],
+            },
+            session=FakeSession(self._web_handler(on_conversation)),
+        )
+
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["http_status"], 422)
+        self.assertEqual(res["error_code"], "upstream_http_error")
+        err = res["error"]
+        self.assertTrue(err.startswith("上游 422："), err)
+        # 上游原文用 JSON 表示，不是 Python 的 dict repr（单引号）
+        self.assertIn('{"detail": "Invalid conversation body"}', err)
+        self.assertNotIn("'detail'", err)
+        # 得能看出是哪一步、我们发了什么、试过哪几种形态
+        self.assertIn("/f/conversation", err)
+        self.assertIn("model=gpt-5.6-luna", err)
+        self.assertIn("已试：", err)
+
+    def test_fold_system_messages_leaves_input_untouched_and_invents_user_turn(self) -> None:
+        original, _history, _last_user, _ids = web_text_worker.normalize_web_messages([
+            {"role": "system", "content": "Be brief."},
+            {"role": "assistant", "content": "Hi."},
+        ])
+        snapshot = json.dumps(original, ensure_ascii=False, sort_keys=True)
+
+        folded, count = web_text_worker.fold_system_messages(original)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(json.dumps(original, ensure_ascii=False, sort_keys=True), snapshot)
+        # 没有 user 消息时，合并出来的说明本身得顶上一条 user turn
+        self.assertEqual([m["author"]["role"] for m in folded], ["user", "assistant"])
+        self.assertEqual(folded[0]["content"]["parts"][0], "Be brief.")
+
+        # 没有 system 就是原样返回，计数为 0（上层据此决定不必多准备一套 body）
+        plain, _plain_history, _plain_last, _plain_ids = web_text_worker.normalize_web_messages([
+            {"role": "user", "content": "hi"},
+        ])
+        kept, kept_count = web_text_worker.fold_system_messages(plain)
+        self.assertEqual(kept_count, 0)
+        self.assertEqual([m["author"]["role"] for m in kept], ["user"])
+
 
 if __name__ == "__main__":
     unittest.main()
