@@ -499,5 +499,63 @@ class ImageWorkerUnitTests(unittest.TestCase):
         self.assertEqual(res_429["retry_after"], 95)
 
 
+
+class UpstreamTextClassificationTests(unittest.TestCase):
+    """上游把生图当文字答回来时，那段话怎么归类、真实状态码怎么带出去。"""
+
+    def test_temporarily_unavailable_is_not_rate_limited(self):
+        # 上游说「暂时不可用」是它自己不行，不是「你请求太多」。两者处理方式不同，
+        # 混成一个码会让人白等或白换号。
+        for text in (
+            "Image generation is temporarily unavailable.",
+            "Image generation is temporarily unavailable. You can try again later.",
+            "图片生成功能暂时不可用。输出尺寸要求：1024 × 1024。",
+            "服务不可用，请稍后再试",
+        ):
+            self.assertEqual(
+                image_worker._classify_upstream_text_error(text),
+                "upstream_unavailable",
+                text,
+            )
+
+    def test_explicit_rate_limit_still_wins(self):
+        for text in ("You are being rate limited.", "429 Too Many Requests", "请求过于频繁"):
+            self.assertEqual(
+                image_worker._classify_upstream_text_error(text),
+                "upstream_rate_limited",
+                text,
+            )
+
+    def test_quota_ban_token_and_fallback(self):
+        cases = {
+            "You have reached your limit for image generation.": "upstream_quota_exceeded",
+            "Your account has been suspended.": "upstream_banned",
+            "Your authentication token has been invalidated.": "upstream_token_invalid",
+            "Sure, here is a short note about cats.": "upstream_text_reply",
+            "": "upstream_text_reply",
+        }
+        for text, expected in cases.items():
+            self.assertEqual(image_worker._classify_upstream_text_error(text), expected, text)
+
+    def test_status_of_reads_the_real_upstream_code(self):
+        self.assertEqual(image_worker._status_of(FakeResponse(status_code=200)), 200)
+        self.assertEqual(image_worker._status_of(FakeResponse(status_code=429)), 429)
+        # 拿不到就返回 None —— 宁可不写，也不编一个数字。
+        self.assertIsNone(image_worker._status_of(object()))
+        self.assertIsNone(image_worker._status_of(FakeResponse(status_code=0)))
+
+    def test_error_carries_upstream_status_separately(self):
+        err = image_worker.ImageWorkerError(
+            "上游回了一段文字",
+            http_status=502,
+            error_code="upstream_text_reply",
+            upstream_status=200,
+        )
+        # 对外 502，上游实际 200：两个数各存各的。
+        self.assertEqual(err.http_status, 502)
+        self.assertEqual(err.upstream_status, 200)
+        self.assertIsNone(image_worker.ImageWorkerError("x").upstream_status)
+
+
 if __name__ == "__main__":
     unittest.main()

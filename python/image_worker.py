@@ -128,21 +128,32 @@ class ImageWorkerError(RuntimeError):
         error_code: str = "upstream_error",
         conversation_id: str = "",
         retry_after: int | None = None,
+        # 上游**真实**返回的状态码。http_status 是我们归一化后给客户端看的，
+        # 两者常常不是一回事：上游 200 + 一段文字，我们对外是 502。
+        # 分开记，才不会把「上游好好的、只是不肯画」看成「上游网关挂了」。
+        upstream_status: int | None = None,
     ) -> None:
         super().__init__(message)
         self.http_status = http_status
         self.error_code = error_code
         self.conversation_id = conversation_id
         self.retry_after = retry_after
+        self.upstream_status = upstream_status
 
 
 class ImageContentPolicyError(ImageWorkerError):
-    def __init__(self, message: str, conversation_id: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        conversation_id: str = "",
+        upstream_status: int | None = None,
+    ) -> None:
         super().__init__(
             message or "Image generation was rejected by upstream content policy.",
             http_status=400,
             error_code="content_policy_violation",
             conversation_id=conversation_id,
+            upstream_status=upstream_status,
         )
 
 
@@ -259,6 +270,63 @@ def _is_model_text_reply_instead_of_image(message: str) -> bool:
     if not message:
         return False
     return bool(REFERENCED_IMAGE_IDS_RE.search(message) or TOOL_PARAMS_JSON_RE.search(message))
+
+
+# 上游把生图请求当文本答回来时，那段文字里往往带着真实原因。按关键词粗分几类，
+# 至少让面板能看出是「临时不可用 / 限流 / 额度 / 封号 / Token」中的哪一种，而不是一律
+# upstream_text_reply。分类只影响 error_code，原文另存 lastErrorMessage。
+#
+# 顺序有意义：`temporarily unavailable` 这类话既像限流又像整体故障，先匹配
+# upstream_unavailable 才不会被 rate_limited 抢走 —— "服务暂时不可用" 和
+# "你这个号请求太频繁" 是两件事，处理方式也不同（前者等，后者换号/等重置）。
+_UPSTREAM_TEXT_ERROR_RULES = (
+    ("upstream_unavailable", (
+        "temporarily unavailable", "temporarily down", "service unavailable",
+        "currently unavailable", "isn't available", "not available right now",
+        "暂时不可用", "暂时无法", "服务不可用", "当前不可用",
+    )),
+    ("upstream_rate_limited", (
+        "rate limit", "rate-limit", "too many requests", "429",
+        "try again later", "slow down",
+        "请求过于频繁", "频率限制", "稍后再试",
+    )),
+    ("upstream_quota_exceeded", (
+        "quota", "limit reached", "reached your limit", "usage limit",
+        "insufficient", "no credits", "out of credits", "upgrade",
+        "额度", "上限", "次数已用完", "额度用尽",
+    )),
+    ("upstream_banned", (
+        "banned", "suspended", "deactivated", "disabled",
+        "account has been", "封禁", "封号", "停用", "禁用",
+    )),
+    ("upstream_token_invalid", (
+        "token_invalidated", "token_revoked", "invalidated oauth token",
+        "authentication token", "unauthorized", "session expired",
+        "登录失效", "token 失效",
+    )),
+)
+
+
+def _status_of(response: Any) -> int | None:
+    """上游响应对象上的真实状态码。拿不到就返回 None —— 宁可不写，也不编一个数字。"""
+    for attr in ("status_code", "status"):
+        try:
+            code = int(getattr(response, attr, None))
+        except (TypeError, ValueError):
+            continue
+        if 100 <= code <= 599:
+            return code
+    return None
+
+
+def _classify_upstream_text_error(text: str) -> str:
+    low = str(text or "").lower()
+    if not low:
+        return "upstream_text_reply"
+    for code, keywords in _UPSTREAM_TEXT_ERROR_RULES:
+        if any(keyword in low for keyword in keywords):
+            return code
+    return "upstream_text_reply"
 
 
 def _validate_https_url(url: str, label: str = "url") -> str:
@@ -1865,19 +1933,22 @@ class OpenAIWebImageClient:
 
             if message and not file_ids and not sediment_ids and state.blocked:
                 detailed = self._get_detailed_task_error(conversation_id, wait_secs=min(1.0, self.settle_secs))
-                raise ImageContentPolicyError(detailed or message, conversation_id)
+                raise ImageContentPolicyError(detailed or message, conversation_id, _status_of(sse_resp))
 
             is_text_reply = bool(message and _is_model_text_reply_instead_of_image(message))
             should_poll = bool(references) or state.turn_use_case == "image gen" or is_text_reply
 
             if message and not file_ids and not sediment_ids and not should_poll:
                 if _is_content_policy_error(message):
-                    raise ImageContentPolicyError(message, conversation_id)
+                    raise ImageContentPolicyError(message, conversation_id, _status_of(sse_resp))
                 raise ImageWorkerError(
                     _sanitize_error_text(message),
+                    # 对客户端是 502（确实没拿到图），但上游给的是 200：
+                    # 流正常走完了，只是内容是一段文字。两个码都留着。
                     http_status=502,
-                    error_code="upstream_text_reply",
+                    error_code=_classify_upstream_text_error(message),
                     conversation_id=conversation_id,
+                    upstream_status=_status_of(sse_resp),
                 )
 
             if should_poll and not conversation_id:
@@ -1887,7 +1958,7 @@ class OpenAIWebImageClient:
                 detailed = self._get_detailed_task_error(conversation_id, wait_secs=min(0.5, self.settle_secs))
                 if detailed:
                     if _is_content_policy_error(detailed):
-                        raise ImageContentPolicyError(detailed, conversation_id)
+                        raise ImageContentPolicyError(detailed, conversation_id, _status_of(sse_resp))
                     raise ImageWorkerError(
                         _sanitize_error_text(detailed),
                         http_status=502,
@@ -2086,6 +2157,7 @@ def handle_payload(data: Any, *, session: Any = None) -> Dict[str, Any]:
             "error_code": exc.error_code,
             "error": _sanitize_error_text(str(exc)),
             **({"retry_after": exc.retry_after} if exc.retry_after is not None else {}),
+            **({"upstream_status": exc.upstream_status} if exc.upstream_status is not None else {}),
         }
     except UpstreamHTTPError as exc:
         status = int(exc.status_code or 502)
@@ -2117,6 +2189,8 @@ def handle_payload(data: Any, *, session: Any = None) -> Dict[str, Any]:
             "error_code": code,
             "error": _sanitize_error_text(str(exc)),
             **({"retry_after": exc.retry_after} if exc.retry_after is not None else {}),
+            # 这条分支的 status 本来就是上游给的，如实带上。
+            "upstream_status": status,
         }
     except Exception as exc:
         msg = str(exc)

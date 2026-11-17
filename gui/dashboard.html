@@ -339,6 +339,29 @@
           </table>
         </div>
         <p class="footnote">日志只记数量、释放空间和触发方式，不记文件名与账号信息；文件在 <code>~/.magpie-gptfree/cleanup-log.jsonl</code>。</p>
+
+        <div class="section-head with-top">
+          <h2>生图错误日志</h2>
+          <div class="head-side">
+            <span class="muted tiny" id="imageErrorLogInfo">每个账号失败都会记一条，只留最近 500 条</span>
+            <button id="imageErrorLogRefresh" type="button" class="btn quiet small">刷新</button>
+            <button id="imageErrorLogClear" type="button" class="btn quiet small danger-text">清空日志</button>
+          </div>
+        </div>
+        <div class="table-wrap cleanup-log-wrap">
+          <table class="pool-table cleanup-table">
+            <colgroup>
+              <col class="col-log-time"><col><col class="col-log-trigger"><col class="col-log-num"><col>
+            </colgroup>
+            <thead>
+              <tr>
+                <th>时间</th><th>账号 / 整单</th><th>错误码</th><th>状态</th><th>耗时与上游原文</th>
+              </tr>
+            </thead>
+            <tbody id="imageErrorLogRows"></tbody>
+          </table>
+        </div>
+        <p class="footnote">只记失败、不记成功。账号用槽位号（<code>s</code> + 邮箱哈希前 10 位），不落邮箱明文；上游原文会先去掉 token / 邮箱 / 链接再截断。<strong>整单</strong>那行是一次请求的汇总：试了几个号 / 池子一共几个号，小字「N 个号没轮到」说明 55 秒预算在它们身上没来得及用。<strong>状态</strong>列左边是我们返回给客户端的码，右边小字是上游<em>真实</em>返回的码 —— 上游 200 + 一段文字时两者不一样。文件在 <code>~/.magpie-gptfree/image-errors.jsonl</code>。</p>
       </section>
 
       <section id="importPanel" class="panel hidden" role="tabpanel">

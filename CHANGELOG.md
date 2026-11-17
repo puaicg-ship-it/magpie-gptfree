@@ -4,6 +4,35 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.8.15] - 2026-11-16
+
+### 新增
+
+- **生图错误日志**：`~/.magpie-gptfree/image-errors.jsonl`（0600，一行一条，只留最近 500 条）。每次账号失败记 `{ at, tag, code, status, message }` —— 时间、账号槽位（`s<sha256前10位>`，不落邮箱明文）、归类后的错误码、上游 HTTP 状态码、**脱敏后的上游原文**（去 token/邮箱/URL，压平换行，截断 240 字）。
+  - 为什么要有它：`pool-stats.json` 每个账号只留**最后一次**失败的 code 与原文，同一个号失败第二次就把第一次盖掉了。排查「上游只回了文字」这类问题时，上游那句话本身就是全部线索，需要留得住历史。
+  - 只在失败时写；成功不写。只在账本真正落盘（`statsFile` 存在）时写，内存账本（测试）不会往 home 里丢文件。
+  - 新增 `lib/image-error-log.mjs`：`appendImageErrorLog()` / `readImageErrorLog()` / `clearImageErrorLog()`，追加与裁剪走串行队列，坏行跳过不影响整份读取。
+- **面板能看了**：设置页「清理日志」下面新增「生图错误日志」——时间 / 账号 / 错误码 / 状态 / 上游原文，错误码带中文标签与悬停说明，账号显示遮罩邮箱（悬停看槽位号），原文悬停看全文。带「刷新」「清空日志」。
+  - 新增接口 `GET /api/image-errors`（`limit` 上限 500，返回 `{ total, items, limit }`）与 `POST /api/image-errors/clear`。
+  - 只在切到设置页时拉一次，不占首页请求。
+- 用例 155 → 163（新增 `test/image-error-log.test.mjs` 7 条，含一条走 `poolFetch` 全链路的用例，验证上游原文真的进了文件；`test/gui.test.mjs` 1 条，验证接口与设置页那块表）
+
+### 修复（日志「不准」的三处）
+
+- **`status` 不再冒充上游状态码**。上游把生图请求当文字答回来时，它其实返回的是 **HTTP 200**（流正常走完，只是内容不是图），而我们一直记 `502` —— 看日志的人会以为上游网关挂了。现在 `ImageWorkerError` 带一个 `upstream_status`，worker 从 `response.status_code` 如实取（拿不到就留空，不编数字），一路透传到日志的 `upstreamStatus` 和账本的 `lastUpstreamStatus`。面板「上次失败」悬停会写「上游实际返回：200（流是好的，只是内容不是图）」，错误日志表的状态列也是两个码并排。
+- **「上游临时不可用」不再算进限流**。`temporarily unavailable` / `暂时不可用` 这类话原来被 `upstream_rate_limited` 抢走，但「上游自己不行」和「你这个号请求太频繁」是两件事（一个该等，一个该换号/等重置）。新增 `upstream_unavailable` 分类并排在最前面匹配。
+- **整单失败多记一条汇总**。池子 20 个号、55 秒预算只够试 7 个时，原来日志里只有 7 条失败，剩下 13 个「没轮到」和「试了失败」长得一模一样，很容易误读成「全部号都挂了」。现在一次请求失败额外写一条 `kind: "request"` 的记录：`attempted` / `poolSize` / `skipped` / `ms` / `requestId`，和账号记录用同一个 `requestId` 串起来。面板上显示成「整单 · 试 7/23」+「16 个号没轮到」。
+
+## [0.8.14] - 2026-11-16
+
+### 修复
+
+- **上游只回文字时，能看见它到底说了什么了**。以前生图请求被上游用文字回绝（不是图片、也不是内容政策），一律记成笼统的 `upstream_text_reply`，面板上只有这个代号，原文在 worker → 网关 → 账本一路被丢掉，事后完全无法判断是限流、额度、封号还是 Token 失效。现在：
+  - 按关键词把那段文字粗分成 `upstream_rate_limited` / `upstream_quota_exceeded` / `upstream_banned` / `upstream_token_invalid`，分不出来的仍记 `upstream_text_reply`（`python/image_worker.py`）
+  - 脱敏后的原文存进账号账本的 `lastErrorMessage`（截断 180 字，去 token/邮箱/URL），面板「上次失败」悬停提示直接显示「上游原文：…」
+  - 成功一次后清空，和 `lastErrorCode` 同步
+- 面板补了这几个新错误码的中文标签与悬停说明
+
 ## [0.8.13] - 2026-11-16
 
 ### 变更

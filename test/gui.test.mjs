@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createGuiService, GUI_PORT, startGuiServer } from "../lib/gui-service.mjs";
 import { createInMemoryStatsStore, recordImageCall, recordQuotaCheck } from "../lib/pool-stats.mjs";
+import { IMAGE_ERROR_LOG_MAX_LIMIT, appendImageErrorLog } from "../lib/image-error-log.mjs";
 import { accountSlotTag, formatAccountSlotLabel } from "../lib/pool-connection.mjs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -776,6 +777,65 @@ test("startGuiServer retries a busy port, and recovers once the old host release
   } finally {
     if (service) await service.close();
     if (blocker.listening) await new Promise((resolve) => blocker.close(resolve));
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("GUI 生图错误日志：GET /api/image-errors 读最近记录，POST clear 清空", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-errlog-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = join(dir, "home");
+  const h = await harness({ poolRead: async () => [] });
+  try {
+    // 设置页真的有这块表，不然接口通了也没地方看。
+    assert.match(h.html, /id="imageErrorLogRows"/);
+    assert.match(h.html, /id="imageErrorLogClear"/);
+    // 一条都没有时也要能读（返回空数组，不是 404 —— 面板一进设置页就会拉）。
+    let res = await h.api("image-errors");
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json.items, []);
+    assert.equal(res.json.total, 0);
+    assert.equal(res.json.limit, IMAGE_ERROR_LOG_MAX_LIMIT);
+
+    const at = Date.parse("2026-11-16T02:00:00");
+    await appendImageErrorLog({
+      email: "someone@example.com",
+      code: "upstream_text_reply",
+      status: 502,
+      message: "图片生成功能暂时不可用。输出尺寸要求：1024 × 1024。",
+    }, { nowMs: at });
+    await appendImageErrorLog({
+      email: "someone@example.com",
+      code: "upstream_rate_limited",
+      status: 429,
+      message: "Image generation is temporarily unavailable.",
+    }, { nowMs: at + 1000 });
+
+    res = await h.api("image-errors?limit=10");
+    assert.equal(res.status, 200);
+    assert.equal(res.json.total, 2);
+    assert.equal(res.json.items[0].code, "upstream_rate_limited", "新的在前");
+    assert.equal(res.json.items[1].code, "upstream_text_reply");
+    assert.equal(res.json.items[1].status, 502);
+    // 邮箱不能出现在接口返回里，只能是槽位号。
+    const raw = JSON.stringify(res.json);
+    assert.doesNotMatch(raw, /someone@example\.com/);
+    assert.match(res.json.items[0].tag, /^s[0-9a-f]{10}$/);
+
+    // limit 只影响条数，不影响 total。
+    res = await h.api("image-errors?limit=1");
+    assert.equal(res.json.items.length, 1);
+    assert.equal(res.json.total, 2);
+
+    res = await h.api("image-errors/clear", {});
+    assert.equal(res.status, 200);
+    assert.equal(res.json.removed, 2);
+    res = await h.api("image-errors");
+    assert.equal(res.json.total, 0);
+  } finally {
+    await h.close();
     if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
     else process.env.MAGPIE_GPTFREE_HOME = previousHome;
     await rm(dir, { recursive: true, force: true });

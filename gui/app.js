@@ -485,6 +485,12 @@
     invalid_image: "图片不合规",
     upstream_bad_request: "上游拒绝请求",
     upstream_error: "上游报错",
+    upstream_text_reply: "上游只回了文字",
+    upstream_unavailable: "上游临时不可用",
+    upstream_rate_limited: "上游限流",
+    upstream_quota_exceeded: "上游额度用尽",
+    upstream_banned: "上游封号",
+    upstream_token_invalid: "上游 Token 失效",
     pool_empty: "池里没有可用号",
     reauth_failed: "重新登录失败",
   };
@@ -499,6 +505,12 @@
     rate_limited: "被上游限流，等额度重置后自动恢复",
     quota_exhausted: "这个号的生图额度用完了，会自动换下一个号",
     content_policy_violation: "提示词被上游安全策略拒绝，换提示词而不是换号",
+    upstream_text_reply: "上游对生图请求返回了文字而不是图片，多半是账号状态/额度问题；具体原文见「上次失败」悬停提示",
+    upstream_unavailable: "上游自己说「暂时不可用」—— 不是这个号的问题，等一会儿再试；跟限流（你请求太多）是两件事",
+    upstream_rate_limited: "上游限流，等恢复或换号",
+    upstream_quota_exceeded: "这个号的上游生图额度用尽，会自动换号",
+    upstream_banned: "账号被上游封禁/停用，需要换号",
+    upstream_token_invalid: "Token 失效，需要重新登录",
   };
   function errorLabel(code) {
     if (!code) return "";
@@ -506,6 +518,20 @@
   }
   function errorHint(code) {
     return ERROR_HINTS[code] || "";
+  }
+  /**
+   * 「上次失败」悬停的尾巴：上游原文 + 上游真实状态码。
+   * 上游 200 + 一段文字时，只看到 502 会以为是上游网关挂了，所以把真实码也写出来。
+   */
+  function upstreamNote(account) {
+    const parts = [];
+    if (account.lastUpstreamStatus === 200) {
+      parts.push("\n上游实际返回：200（流是好的，只是内容不是图）");
+    } else if (account.lastUpstreamStatus) {
+      parts.push("\n上游实际返回：" + account.lastUpstreamStatus);
+    }
+    if (account.lastErrorMessage) parts.push("\n上游原文：" + account.lastErrorMessage);
+    return parts.join("");
   }
   function formatDuration(ms) {
     if (!Number.isFinite(ms) || ms <= 0) return "";
@@ -1174,7 +1200,8 @@
       const err = el("span", "cell-sub", "上次失败：" + errorLabel(account.lastErrorCode));
       err.title = account.lastErrorCode +
         (account.lastErrorAt ? " · " + formatTime(account.lastErrorAt, "发生在 ") : "") +
-        (errorHint(account.lastErrorCode) ? "\n" + errorHint(account.lastErrorCode) : "");
+        (errorHint(account.lastErrorCode) ? "\n" + errorHint(account.lastErrorCode) : "") +
+        upstreamNote(account);
       statusStack.append(err);
     }
     statusTd.append(statusStack);
@@ -1188,7 +1215,8 @@
     if (account.lastErrorCode) {
       callsTd.title = "上次失败：" + errorLabel(account.lastErrorCode) +
         "（" + account.lastErrorCode + "）" +
-        (errorHint(account.lastErrorCode) ? "\n" + errorHint(account.lastErrorCode) : "");
+        (errorHint(account.lastErrorCode) ? "\n" + errorHint(account.lastErrorCode) : "") +
+        upstreamNote(account);
     }
     tr.append(callsTd);
 
@@ -1980,6 +2008,145 @@
     }
   }
 
+  // ---------- 生图错误日志 ----------
+  // 账本每个号只留最后一次失败的原文，同一个号失败第二次就盖掉了。这份是只追加的，
+  // 排查「上游只回了文字」这类问题全靠它 —— 上游那句话本身就是全部线索。
+  let imageErrorLog = null;
+  let imageErrorLogLoading = false;
+
+  async function loadImageErrorLog() {
+    if (imageErrorLogLoading) return;
+    imageErrorLogLoading = true;
+    try {
+      imageErrorLog = await api("image-errors?limit=100");
+      renderImageErrorLog();
+    } catch (err) {
+      const info = $("imageErrorLogInfo");
+      if (info) info.textContent = "错误日志读取失败：" + err.message;
+    } finally {
+      imageErrorLogLoading = false;
+    }
+  }
+
+  /** 槽位号 → 遮罩邮箱。日志里只存了 `s<10hex>`，得靠当前账号表翻成人话。 */
+  function slotLabelMap() {
+    const map = new Map();
+    for (const account of accountsOf()) {
+      if (account.slotTag) map.set(account.slotTag, account.slotLabel || account.slotTag);
+    }
+    return map;
+  }
+
+  /** 错误码 → pill 颜色：号废了用 bad，临时的（限流/额度/超时/上游回文字）用 warn。 */
+  function errorPillClass(code) {
+    const value = String(code || "");
+    if (/banned|token_invalid|unauthorized|reauth_failed/.test(value)) return "bad";
+    if (/rate_limited|quota|timeout|text_reply|upstream_error/.test(value)) return "warn";
+    return "neutral";
+  }
+
+  function renderImageErrorLog() {
+    const body = $("imageErrorLogRows");
+    if (!body) return;
+    body.replaceChildren();
+    const items = imageErrorLog?.items || [];
+    const info = $("imageErrorLogInfo");
+    if (info) {
+      info.textContent = imageErrorLog
+        ? (items.length < (imageErrorLog.total || 0)
+          ? `共 ${imageErrorLog.total} 条，显示最近 ${items.length} 条`
+          : `共 ${items.length} 条 · 只留最近 500 条`)
+        : "每个账号失败都会记一条，只留最近 500 条";
+    }
+    if (!items.length) {
+      const row = el("tr", "empty-row");
+      const cell = el("td", "",
+        "还没有失败记录。生图失败（限流、额度用尽、封号、上游只回文字…）之后，这里会出现一条。");
+      cell.colSpan = 5;
+      row.append(cell);
+      body.append(row);
+      return;
+    }
+    const labels = slotLabelMap();
+    for (const entry of items) {
+      const row = el("tr");
+      const time = el("td", "log-time", formatShortTime(entry.at));
+      time.title = entry.at;
+
+      // 「整单」那行是请求汇总：试了几个号 / 池子里一共几个号。
+      // 池子 20 个、只试了 7 个的时候，「没轮到」必须一眼看得出来，
+      // 否则会把一次预算耗尽误读成「全部号都挂了」。
+      const acct = el("td");
+      if (entry.kind === "request") {
+        const tried = Number(entry.attempted ?? 0);
+        const pool = Number(entry.poolSize ?? 0);
+        const label = pool ? `整单 · 试 ${tried}/${pool}` : "整单";
+        const name = el("span", "acct-name", label);
+        if (entry.requestId) name.title = "request " + entry.requestId;
+        acct.append(name);
+        if (Number(entry.skipped) > 0) {
+          acct.append(el("div", "cell-sub", `${entry.skipped} 个号没轮到`));
+        }
+      } else {
+        const name = el("span", "acct-name", labels.get(entry.tag) || entry.tag || "—");
+        if (entry.tag) name.title = entry.tag;
+        acct.append(name);
+      }
+
+      const code = el("td");
+      const pill = el("span", "pill " + errorPillClass(entry.code),
+        errorLabel(entry.code) || entry.code || "—");
+      const hint = errorHint(entry.code);
+      if (hint) pill.title = hint;
+      code.append(pill);
+
+      // 两个状态码并排：左边是我们返回给客户端的，右边小字是上游真实给的。
+      // 上游 200 + 一段文字时，只显示 502 会让人以为上游网关挂了。
+      const status = el("td", "log-num" + (entry.status ? "" : " zero"),
+        entry.status ? String(entry.status) : "—");
+      if (entry.upstreamStatus && entry.upstreamStatus !== entry.status) {
+        status.append(el("div", "cell-sub", `上游 ${entry.upstreamStatus}`));
+        status.title = `我们返回 ${entry.status}，上游实际 ${entry.upstreamStatus}`;
+      } else if (entry.upstreamStatus) {
+        status.title = `上游实际也是 ${entry.upstreamStatus}`;
+      }
+
+      const message = el("td", "log-args", errorLogMessageText(entry));
+      if (entry.message) message.title = entry.message;
+
+      row.append(time, acct, code, status, message);
+      body.append(row);
+    }
+  }
+
+  /** 原文列：请求汇总那行把耗时和「没轮到」摆在前面，光看错误码看不出这两件事。 */
+  function errorLogMessageText(entry) {
+    const bits = [];
+    if (entry.kind === "request") {
+      if (Number(entry.ms) > 0) bits.push(`${(Number(entry.ms) / 1000).toFixed(1)}s`);
+      if (Number(entry.skipped) > 0) bits.push(`${entry.skipped} 个号没轮到`);
+    }
+    if (entry.message) bits.push(entry.message);
+    return bits.join(" · ") || "—";
+  }
+
+  async function clearImageErrorLog() {
+    const sure = await confirmAction({
+      title: "清空生图错误日志",
+      message: "只删掉这份记录，不会动账号和账本。清空之后历史失败原因就查不回来了。",
+      confirmText: "清空日志",
+    });
+    if (!sure) return;
+    try {
+      const result = await api("image-errors/clear", {});
+      imageErrorLog = { total: 0, items: [] };
+      renderImageErrorLog();
+      notice(`已清空 ${result.removed || 0} 条错误记录`);
+    } catch (err) {
+      notice(err.message, true);
+    }
+  }
+
   // 设置页的「立即清理」：不受保留天数和时段限制，跟图片页原来的「执行清理」是同一个动作。
   async function purgeFromSettings() {
     const days = Number($("settingsPurgeDays").value);
@@ -2245,7 +2412,10 @@
     // 图片页 / 设置页的数据量跟账号页无关，切过去才拉
     //（服务端有 30 秒目录缓存，重复切不贵）。
     if (next === "images") loadImages();
-    if (next === "settings") loadCleanupLog();
+    if (next === "settings") {
+      loadCleanupLog();
+      loadImageErrorLog();
+    }
   }
 
   function setup() {
@@ -2465,7 +2635,7 @@
       $("settingsStatus").textContent = "正在刷新…";
       try {
         await refreshData({ quiet: true });
-        await loadCleanupLog();
+        await Promise.all([loadCleanupLog(), loadImageErrorLog()]);
         $("settingsStatus").textContent = "";
       } catch (err) {
         $("settingsStatus").textContent = "刷新失败：" + err.message;
@@ -2513,6 +2683,11 @@
       loadCleanupLog();
     });
     $("cleanupLogClear")?.addEventListener("click", clearCleanupLog);
+    $("imageErrorLogRefresh")?.addEventListener("click", () => {
+      $("imageErrorLogInfo").textContent = "正在刷新…";
+      loadImageErrorLog();
+    });
+    $("imageErrorLogClear")?.addEventListener("click", clearImageErrorLog);
     // 拖动框选：按住某一行（或某张卡片）往下/往上划过一片就连续选中（像文件管理器）。
     // 重绘会换掉鼠标下的节点，所以只在选择真的变了时才重绘，否则会打转。
     // 挂在外层容器上、用 [data-name] 找目标：列表的行和网格的卡片都带这个属性。

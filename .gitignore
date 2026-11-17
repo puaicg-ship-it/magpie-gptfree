@@ -21,6 +21,7 @@ master.key
 scripts/release.sh
 scripts/update-server.sh
 scripts/upstream-status.sh
+scripts/deploy-local.sh
 scripts/.release-token
 .magpie-gptpool-release.env
 *.release.env
