@@ -963,7 +963,9 @@ test("the live dashboard exposes capacity, forecast and the request ring without
     const limitsRow = stats.json.accounts.find((row) => row.limits && row.limits.length);
     assert.ok(limitsRow, "带 limits 的账号行要把它暴露出来");
     assert.deepEqual(limitsRow.limits.map((item) => item.feature).sort(), ["image_gen", "other_tool"]);
-    assert.equal(limitsRow.effectiveWeight, null, "0.10.0 还没有生效权重");
+    // 0.11.0：生效权重由 gui-service 用 pool-weight 现算，必须是正数。
+    assert.ok(limitsRow.effectiveWeight > 0, "生效权重应该算出来了");
+    assert.equal(limitsRow.autoTier !== undefined, true, "自动分级也要给出来（哪怕只展示）");
     assert.ok(stats.json.summary.utilization);
 
     // 写一条请求进 ring，增量拉取应该只回这一条。

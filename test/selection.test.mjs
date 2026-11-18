@@ -18,6 +18,7 @@ import {
   recordImageCall,
   recordQuotaCheck,
   recordTextCall,
+  setAccountPolicy,
   summarizePoolStats,
 } from "../lib/pool-stats.mjs";
 import { accountSlotTag } from "../lib/pool-connection.mjs";
@@ -830,19 +831,163 @@ test("a text rate limit without retry_after still gets the default cooldown", as
 
 // 0.10.0 只观测：tier / 权重都还不存在，effectiveWeight 必须是 null，
 // 否则 0.11.0 接权重时看不出「这个值到底有没有生效」。
-test("the 0.10.0 snapshot exposes observation fields but no effective weight", async () => {
+test("the snapshot exposes observation fields without inventing a tier or a weight", async () => {
   const store = createInMemoryStatsStore();
   const email = "obs@example.com";
   await recordImageCall({ email, success: true, ms: 30000, ttfbMs: 5000 }, { statsStore: store });
   const snap = summarizePoolStats([account(email)], store.state);
   const row = snap.accounts[0];
-  assert.equal(row.effectiveWeight, null);
-  assert.equal(row.tier, undefined, "0.10.0 不推断分级");
+  assert.equal(row.effectiveWeight, null, "有效权重由 gui-service 用 pool-weight 现算");
+  // 0.11.0：row.tier 只放**手工设置**的分级；没设过就是 null，不在这里推断。
+  assert.equal(row.tier, null, "没手工设过分级就不能编一个出来");
+  assert.equal(row.tierSource, null);
+  assert.equal(row.weightMul, null);
   assert.equal(row.burnRatePerHour, null, "没有额度检测快照就谈不上消耗速率");
   assert.equal(row.etaExhaustMs, null);
   assert.deepEqual(row.limits, []);
+  // 文本额度默认不派生（textQuotaFeatures 为空），所以是 null 而不是 0。
+  assert.equal(row.textQuota, null);
+  assert.equal(snap.quotaStats.textActive, 0);
+  assert.equal(snap.quotaStats.totalTextQuota, 0);
   assert.ok("textStatus" in row);
   assert.ok("utilization" in snap.quotaStats);
+  assert.ok("tierDist" in snap.quotaStats);
+});
+
+// ---------- 0.11.0：分级 / 文本额度 / 快变量画像 ----------
+
+test("manual tier and weight multiplier survive a write-then-read round trip", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "policy@example.com";
+  const tag = accountSlotTag(email);
+
+  await setAccountPolicy(email, { tier: "S", weightMul: 2.5 }, { statsStore: store });
+  let rec = store.state.accounts[tag];
+  assert.equal(rec.tier, "S");
+  assert.equal(rec.tierSource, "manual");
+  assert.equal(rec.weightMul, 2.5);
+
+  // 不传 tier 只改倍率：分级保持原样
+  await setAccountPolicy(email, { weightMul: 0.5 }, { statsStore: store });
+  rec = store.state.accounts[tag];
+  assert.equal(rec.tier, "S");
+  assert.equal(rec.weightMul, 0.5);
+
+  // 传 null 才清回自动
+  await setAccountPolicy(email, { tier: null }, { statsStore: store });
+  rec = store.state.accounts[tag];
+  assert.equal(rec.tier, null);
+  assert.equal(rec.tierSource, null);
+
+  // 非法值不接受
+  await setAccountPolicy(email, { tier: "X", weightMul: -1 }, { statsStore: store });
+  rec = store.state.accounts[tag];
+  assert.equal(rec.tier, null);
+  assert.equal(rec.weightMul, null);
+});
+
+test("ewma success rate and hang streak are tracked without touching the death rules", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "ewma@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordImageCall({ email, success: true, ms: 1000 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].ewmaSuccess, 1, "首个成功样本直接是 1");
+
+  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].ewmaSuccess, 0.7, "0.3 alpha：1 → 0.7");
+  assert.equal(store.state.accounts[tag].hangStreak, 1);
+
+  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].hangStreak, 2);
+  assert.ok(store.state.accounts[tag].lastHangAt);
+
+  // 普通失败既不增加也不清零卡死计数
+  await recordImageCall({ email, success: false, error: "upstream_error" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].hangStreak, 2);
+
+  // 一次成功清零
+  await recordImageCall({ email, success: true, ms: 1000 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].hangStreak, 0);
+  // 1 → 0.7 → 0.49 → 0.343（普通失败也算一次失败样本）→ 0.343*0.7+0.3 = 0.5401
+  assert.equal(store.state.accounts[tag].ewmaSuccess, 0.54);
+});
+
+test("a text quota derived from limits is stored and survives a check without limits", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "textquota@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordQuotaCheck({
+    email,
+    quota: 9,
+    limits: [{ feature: "reason", remaining: 16, resetAt: "2026-11-19T00:00:00.000Z" }],
+    textQuota: 16,
+    textHasLimit: true,
+    textRestoreAt: "2026-11-19T00:00:00.000Z",
+  }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].textQuota, 16);
+  assert.equal(store.state.accounts[tag].textHasLimit, true);
+  assert.ok(store.state.accounts[tag].textQuotaCheckedAt);
+
+  // 上游这次没返回 limits（textQuota 传 null）→ 保留旧值，不能抹成 0
+  await recordQuotaCheck({ email, quota: 8 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].textQuota, 16, "没给新快照就保留旧的");
+  assert.equal(store.state.accounts[tag].imageQuota, 8);
+
+  const snap = summarizePoolStats([account(email)], store.state);
+  assert.equal(snap.accounts[0].textQuota, 16);
+  assert.equal(snap.quotaStats.textActive, 1);
+  assert.equal(snap.quotaStats.totalTextQuota, 16);
+});
+
+// 文本链路以前完全不看账本，于是「图片额度 0、但有文本额度」的号在文本链路上
+// 被当成权重 0.05 排到最后，等于白白浪费。这条用例钉住新行为。
+test("text mode keeps an image-exhausted account usable when it still has text quota", () => {
+  const rich = { email: "textrich@example.com", password: "p", totp: "s", accessToken: "t" };
+  const imageOnly = { email: "imageonly@example.com", password: "p", totp: "s", accessToken: "t" };
+  const stats = statsWith({
+    [rich.email]: { imageQuota: 0, textQuota: 20, successCalls: 4, failCalls: 0 },
+    [imageOnly.email]: { imageQuota: 30, textQuota: null, successCalls: 4, failCalls: 0 },
+  });
+
+  const imageOrder = selectPoolOrder({ accounts: [rich, imageOnly], stats, credit: new Map() });
+  assert.equal(imageOrder[0].email, imageOnly.email, "生图链路当然优先有额度的号");
+
+  const textOrder = selectPoolOrder({
+    accounts: [rich, imageOnly], stats, mode: "text", credit: new Map(),
+  });
+  assert.equal(textOrder[0].email, rich.email, "文本链路按文本额度排，图片额度 0 不影响");
+});
+
+test("text mode buckets a text-limited account behind usable ones but never kills it", () => {
+  const fresh = { email: "textfresh@example.com", password: "p", totp: "s", accessToken: "t" };
+  const cooling = { email: "textcool@example.com", password: "p", totp: "s", accessToken: "t" };
+  const stats = statsWith({
+    [fresh.email]: { imageQuota: 0, textQuota: 5 },
+    [cooling.email]: {
+      imageQuota: 0,
+      textQuota: 50,
+      textLimitedUntil: new Date(Date.now() + 600_000).toISOString(),
+    },
+  });
+  const order = selectPoolOrder({ accounts: [cooling, fresh], stats, mode: "text", credit: new Map() });
+  assert.equal(order[0].email, fresh.email, "冷却中的号排到后面");
+  assert.equal(order.length, 2, "但仍然留在队列里，不是判死");
+});
+
+test("text mode does not apply the image death rules", () => {
+  const never = { email: "neverimg@example.com", password: "p", totp: "s", accessToken: "t" };
+  const stats = statsWith({
+    // 20 次失败、一次没成功 → 图片链路判 never 死
+    [never.email]: { imageQuota: 5, successCalls: 0, failCalls: 20 },
+  });
+  const imageOrder = selectPoolOrder({ accounts: [never], stats, credit: new Map() });
+  assert.equal(isAccountDead(never.email, stats), true);
+  assert.equal(imageOrder.length, 1, "判死的号还在兜底队列里");
+  // 文本链路：画不了图不代表答不了话，照样当可用号
+  const textOrder = selectPoolOrder({ accounts: [never], stats, mode: "text", credit: new Map() });
+  assert.equal(textOrder.length, 1);
 });
 
 // 一个只能答话、画不了图的号仍然该被判死：文本成功不能把它从 never 里捞出来。

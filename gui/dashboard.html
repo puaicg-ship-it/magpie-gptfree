@@ -155,6 +155,14 @@
         <div id="poolBatchBar" class="batch-bar">
           <span id="poolBatchCount" class="batch-count">已选 0 个</span>
           <button id="poolBatchCheck" type="button" class="btn secondary small">批量检测额度</button>
+          <span class="batch-split" role="group" aria-label="批量设分级">
+            <span class="muted tiny">分级</span>
+            <button type="button" class="btn quiet small batch-tier" data-tier="S">S</button>
+            <button type="button" class="btn quiet small batch-tier" data-tier="A">A</button>
+            <button type="button" class="btn quiet small batch-tier" data-tier="B">B</button>
+            <button type="button" class="btn quiet small batch-tier" data-tier="C">C</button>
+            <button type="button" class="btn quiet small batch-tier" data-tier="auto">自动</button>
+          </span>
           <button id="poolBatchRemove" type="button" class="btn danger small">批量删除</button>
           <button id="poolBatchClear" type="button" class="btn secondary small">取消选择</button>
           <span id="poolBatchStatus" class="batch-status" role="status" aria-live="polite"></span>
@@ -344,6 +352,31 @@
             <p class="settings-hint" id="settingsRetentionHint"></p>
           </article>
         </div>
+
+        <article class="settings-card with-top">
+          <h3>调度策略</h3>
+          <p class="settings-note">权重怎么算。<strong>默认全部关闭</strong> —— 关着的时候选号行为和 0.10.x 完全一致。改完立刻生效，下一次请求就按新策略选号，不用重启宿主。</p>
+          <div class="settings-row policy-flags">
+            <label class="inline-check"><input type="checkbox" id="policyTierAuto"> <span>自动分级进权重</span></label>
+            <label class="inline-check"><input type="checkbox" id="policyEwma"> <span>EWMA 成功率加权</span></label>
+            <label class="inline-check"><input type="checkbox" id="policyLatency"> <span>首字节延迟加权</span></label>
+            <label class="inline-check"><input type="checkbox" id="policyHang"> <span>连续卡死降权</span></label>
+          </div>
+          <div class="settings-row">
+            <span class="filter-field">文本额度取哪个 feature
+              <span id="policyTextFeatures" class="check-group" role="group" aria-label="文本额度 feature"></span>
+            </span>
+          </div>
+          <p class="settings-hint" id="policyTextHint"></p>
+          <div class="settings-row">
+            <label class="filter-field">S <input id="policyWeightS" type="number" step="0.05" min="0.05" max="5" class="num-input"></label>
+            <label class="filter-field">A <input id="policyWeightA" type="number" step="0.05" min="0.05" max="5" class="num-input"></label>
+            <label class="filter-field">B <input id="policyWeightB" type="number" step="0.05" min="0.05" max="5" class="num-input"></label>
+            <label class="filter-field">C <input id="policyWeightC" type="number" step="0.05" min="0.05" max="5" class="num-input"></label>
+            <button id="policySave" type="button" class="btn secondary small">保存策略</button>
+            <span id="policyStatus" class="batch-status" role="status" aria-live="polite"></span>
+          </div>
+        </article>
 
         <article class="settings-card with-top">
           <h3>立即清理</h3>

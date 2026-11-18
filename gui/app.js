@@ -667,6 +667,28 @@
    * 两种证据都要晚于最近一次换 Token（重新登录会刷新 updatedAt），否则说明
    * 证据是上一个 Token 的，新的还没验证过。
    */
+  /**
+   * 分级徽章。三种状态要分清：
+   * - 手工设的（`account.tier`）→ 一定进权重，用主色；
+   * - 自动推断且已进权重（`effectiveTier`）→ 主色；
+   * - 自动推断但没进权重（只有 `autoTier`）→ 灰色 + 「仅展示」，否则用户会以为
+   *   面板上看到的 S 已经在影响选号。
+   */
+  function tierPill(account) {
+    const manual = account.tier || "";
+    const auto = account.autoTier || "";
+    const tier = manual || auto;
+    if (!tier) return null;
+    const effective = account.effectiveTier === tier;
+    const pill = el("span", "pill " + (effective ? "plan" : "neutral"), tier + " 级");
+    pill.title = manual
+      ? `手工设为 ${tier} 级${effective ? "，已进权重" : ""}`
+      : `自动推断为 ${tier} 级${effective
+        ? "，已进权重"
+        : "，仅展示 —— 打开设置页「自动分级进权重」后才会影响选号"}`;
+    return pill;
+  }
+
   function tokenBadge(account) {
     if (!account.hasAccess || account.tokenState === "missing")
       return { cls: "bad", text: "无可用 Token", confirmed: false, title: "号池里没有这个账号的 access_token，需要重新导入或重新登录" };
@@ -862,6 +884,130 @@
     renderReplyMode();
     renderImageCleanup();
     renderImageRetention();
+    renderPolicy();
+  }
+
+  // ---------- 调度策略 ----------
+  // 策略决定权重怎么算。默认全部关闭，关着的时候选号和 0.10.x 逐位一致 ——
+  // 所以这个面板上每一个勾都是「真的会改变流量分配」的开关，不能随便点。
+  let policyState = null;
+
+  async function loadPolicy() {
+    try {
+      policyState = await api("policy");
+      renderPolicy();
+    } catch (error) {
+      $("policyStatus").textContent = error.message || "策略读取失败";
+    }
+  }
+
+  function policyFeaturesChosen() {
+    const host = $("policyTextFeatures");
+    return [...host.querySelectorAll("input[type=checkbox]")]
+      .filter((input) => input.checked)
+      .map((input) => input.value);
+  }
+
+  function renderPolicy() {
+    const host = $("policyTextFeatures");
+    if (!host) return;
+    if (!policyState) {
+      host.replaceChildren(el("span", "empty", "正在读取策略…"));
+      return;
+    }
+    const policy = policyState.policy || {};
+    $("policyTierAuto").checked = policy.tierAutoWeight === true;
+    $("policyEwma").checked = policy.ewmaWeightEnabled === true;
+    $("policyLatency").checked = policy.latencyWeightEnabled === true;
+    $("policyHang").checked = policy.hangWeightEnabled === true;
+    const weights = policy.tierWeights || {};
+    for (const tier of ["S", "A", "B", "C"]) {
+      $(`policyWeight${tier}`).value = weights[tier] === undefined ? "" : String(weights[tier]);
+    }
+
+    host.replaceChildren();
+    const observed = Array.isArray(policyState.observedFeatures) ? policyState.observedFeatures : [];
+    const chosen = new Set(policy.textQuotaFeatures || []);
+    if (!observed.length) {
+      host.append(el("span", "empty", "还没观测到上游 feature —— 先去总览页点一次「全部检测额度」"));
+    } else {
+      for (const name of observed) {
+        const label = el("label");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = name;
+        input.checked = chosen.has(name);
+        label.classList.toggle("is-on", input.checked);
+        input.addEventListener("change", () => {
+          label.classList.toggle("is-on", input.checked);
+          renderPolicyHint();
+        });
+        label.append(input, el("span", "", name));
+        host.append(label);
+      }
+    }
+    renderPolicyHint();
+
+    // 环境变量压着的时候整块置灰：改了不生效比不让改更糟。
+    const locked = policyState.source === "env";
+    for (const id of ["policyTierAuto", "policyEwma", "policyLatency", "policyHang", "policySave"]) {
+      const node = $(id);
+      if (node) node.disabled = locked;
+    }
+    if (locked) $("policyStatus").textContent = "策略被环境变量锁定，面板上改不了";
+  }
+
+  function renderPolicyHint() {
+    const chosen = policyFeaturesChosen();
+    const hint = $("policyTextHint");
+    if (!hint) return;
+    hint.textContent = chosen.length
+      ? `文本链路会按「${chosen.join(" / ")}」的剩余次数加权。这几个 feature 里哪个真的对应普通对话，得你自己确认 —— 配错会把请求送进「这项还剩很多、但对话其实打不动」的号。`
+      : "没选 feature 时文本链路是等权轮转（和 0.10.x 一样）。上游目前返回的是 reason / deep_research / file_upload / paste_text_to_file / image_gen，没有 text_gen。";
+  }
+
+  async function savePolicy() {
+    if (!policyState) return;
+    const tierWeights = {};
+    for (const tier of ["S", "A", "B", "C"]) {
+      const value = Number($(`policyWeight${tier}`).value);
+      if (Number.isFinite(value) && value > 0) tierWeights[tier] = value;
+    }
+    const body = {
+      tierAutoWeight: $("policyTierAuto").checked,
+      ewmaWeightEnabled: $("policyEwma").checked,
+      latencyWeightEnabled: $("policyLatency").checked,
+      hangWeightEnabled: $("policyHang").checked,
+      textQuotaFeatures: policyFeaturesChosen(),
+      ...(Object.keys(tierWeights).length ? { tierWeights } : {}),
+    };
+    try {
+      const result = await api("policy", body);
+      policyState = { ...policyState, policy: result.policy };
+      renderPolicy();
+      $("policyStatus").textContent = "已保存，下一次请求生效";
+      await refreshData({ quiet: true });
+    } catch (error) {
+      $("policyStatus").textContent = error.message || "保存失败";
+    }
+  }
+
+  /** 批量设分级：`auto` 传 null，后端据此把 tierSource 清掉。 */
+  async function setBatchTier(tier) {
+    const ids = [...selectedIds];
+    if (!ids.length) {
+      $("poolBatchStatus").textContent = "先勾选账号再设分级";
+      return;
+    }
+    try {
+      const result = await api("accounts/policy", { ids, tier: tier === "auto" ? null : tier });
+      $("poolBatchStatus").textContent = tier === "auto"
+        ? `已把 ${result.updated} 个号改回自动分级`
+        : `已把 ${result.updated} 个号设为 ${tier} 级`;
+      await refreshData({ quiet: true });
+    } catch (error) {
+      $("poolBatchStatus").textContent = error.message || "设置失败";
+    }
   }
 
   function renderMeta(accounts) {
@@ -1201,6 +1347,8 @@
     const quotaPill = el("span", "quota-pill " + q.cls, q.pillText);
     if (q.title) quotaPill.title = q.title;
     pills.append(tokenPill, quotaPill);
+    const tier = tierPill(account);
+    if (tier) pills.append(tier);
     statusStack.append(pills);
     const limitNote = limitNoteText(account);
     if (limitNote) {
@@ -1221,6 +1369,17 @@
 
     const quotaTd = el("td", "cell-num", q.quotaCell);
     if (q.title) quotaTd.title = q.title;
+    // 文本额度：只有真的从上游 limits 派生出来才显示（默认不配 feature，就是 null）。
+    // 这一格的意义在于「画不了图但还能答话」的号终于看得见。
+    if (typeof account.textQuota === "number") {
+      const textNote = el("div", "cell-sub",
+        "文本 " + account.textQuota +
+        (account.textLimitedUntil && Date.parse(account.textLimitedUntil) > Date.now() ? " · 限流中" : ""));
+      textNote.title = "上游 limits 里按策略指定的 feature 汇总出来的剩余次数" +
+        (account.textRestoreAt ? "\n预计 " + formatTime(account.textRestoreAt, "") + " 重置" : "") +
+        "\n只影响文本链路的选号，不碰生图额度";
+      quotaTd.append(textNote);
+    }
     tr.append(quotaTd);
 
     const callsTd = el("td", "cell-num", (account.successCalls || 0) + " / " + (account.failCalls || 0));
@@ -2808,6 +2967,7 @@
     if (next === "settings") {
       loadCleanupLog();
       loadImageErrorLog();
+      loadPolicy();
     }
     // 运行页每 2 秒轮询一次，切走必须立刻停，否则会在后台一直打本地服务。
     if (next === "live") startLive();
@@ -2827,6 +2987,11 @@
     $("goImport").addEventListener("click", openImport);
     $("goImportEmpty")?.addEventListener("click", openImport);
     $("goSettingsFromImages")?.addEventListener("click", () => tab("settings"));
+
+    // 调度策略：保存按钮 + 批量分级。
+    $("policySave")?.addEventListener("click", () => { void savePolicy(); });
+    document.querySelectorAll(".batch-tier").forEach((button) =>
+      button.addEventListener("click", () => { void setBatchTier(button.dataset.tier); }));
 
     // 运行面板：刷新 = 重新拉一次全量快照；实时开关只控制增量轮询。
     $("liveRefresh")?.addEventListener("click", () => { void startLive(); });
