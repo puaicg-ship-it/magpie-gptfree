@@ -472,3 +472,22 @@ footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 1
 .cleanup-table td.log-num.zero { color: var(--muted); font-weight: 450 }
 .cleanup-table td.log-args { color: var(--muted); font-size: 11.5px }
 .cleanup-table tr.empty-row td { text-align: center; color: var(--muted); padding: 26px 10px }
+
+/* ---------- 运行面板 ---------- */
+/* 预测 / 活跃度行：名称 · 数值 · 备注，条占满下一行。 */
+.live-row { display: grid; grid-template-columns: minmax(0, 1fr) 52px 76px; gap: 8px; align-items: center; font-size: 12px }
+.live-num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 650; color: var(--text) }
+.live-note { text-align: right; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.live-track { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--bg-soft); overflow: hidden }
+.live-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width .3s ease }
+.live-fill.warn { background: var(--bad) }
+/* 实时请求表：6 列，比账号表窄，不跟着 960px 走。 */
+.live-wrap { max-height: 460px }
+.live-table { min-width: 620px }
+.live-table th { position: sticky; top: 0; z-index: 2; box-shadow: inset 0 -1px var(--line) }
+.live-table td, .live-table th { padding: 7px 10px; vertical-align: middle }
+.live-table td.log-time { font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums }
+.live-table td.log-num { font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap }
+.live-table td.log-num.zero { color: var(--muted); font-weight: 450 }
+.live-table td.log-args { color: var(--muted); font-size: 11.5px }
+.live-table tr.empty-row td { text-align: center; color: var(--muted); padding: 26px 10px }

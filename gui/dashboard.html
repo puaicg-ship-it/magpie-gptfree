@@ -23,6 +23,7 @@
         <div class="tabs" role="tablist" aria-label="功能">
           <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="stats">总览 <span id="poolCount" class="count">0</span></button>
           <button type="button" role="tab" class="tab" aria-selected="false" data-tab="images">图片 <span id="imageCount" class="count">0</span></button>
+          <button type="button" role="tab" class="tab" aria-selected="false" data-tab="live">运行</button>
           <button type="button" role="tab" class="tab" aria-selected="false" data-tab="settings">设置</button>
         </div>
         <button id="goImport" type="button" class="btn primary nav-import" title="粘贴账号文本或选择 TXT 文件，批量导入并自动授权入池">+ 导入账号</button>
@@ -178,6 +179,40 @@
               </tr>
             </thead>
             <tbody id="statsRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="livePanel" class="panel hidden" role="tabpanel">
+        <div class="section-head overview-head">
+          <div>
+            <h2>运行面板</h2>
+            <div id="liveStatus" class="batch-status tiny" role="status" aria-live="polite"></div>
+          </div>
+          <div class="pool-actions">
+            <button id="liveRefresh" type="button" class="btn quiet small">刷新</button>
+            <label class="inline-check"><input type="checkbox" id="liveAuto" checked> <span>实时</span></label>
+          </div>
+        </div>
+        <div class="stats-grid" id="liveCards" aria-label="运行指标"></div>
+        <div class="insights">
+          <article class="insight-card">
+            <div class="insight-head"><h3>额度预警（预计耗尽）</h3><span id="liveForecastInfo" class="muted tiny"></span></div>
+            <div id="liveForecast" class="fail-breakdown"></div>
+          </article>
+          <article class="insight-card">
+            <div class="insight-head"><h3>活跃账号 Top 20</h3><span id="liveActivityInfo" class="muted tiny"></span></div>
+            <div id="liveActivity" class="fail-breakdown"></div>
+          </article>
+        </div>
+        <div class="section-head with-top">
+          <h2>实时请求</h2>
+          <span id="liveLogInfo" class="muted tiny"></span>
+        </div>
+        <div class="table-wrap live-wrap">
+          <table class="live-table">
+            <thead><tr><th>时间</th><th>类型</th><th>账号</th><th>结果</th><th>耗时</th><th>详情</th></tr></thead>
+            <tbody id="liveRows"></tbody>
           </table>
         </div>
       </section>

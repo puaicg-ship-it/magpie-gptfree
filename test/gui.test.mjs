@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createGuiService, GUI_PORT, startGuiServer } from "../lib/gui-service.mjs";
+import { createGuiService, GUI_PORT, startGuiServer, stopGuiServer } from "../lib/gui-service.mjs";
 import { createInMemoryStatsStore, recordImageCall, recordQuotaCheck } from "../lib/pool-stats.mjs";
 import { IMAGE_ERROR_LOG_MAX_LIMIT, appendImageErrorLog } from "../lib/image-error-log.mjs";
 import { accountSlotTag, formatAccountSlotLabel } from "../lib/pool-connection.mjs";
+import { clearRequestLog, recordRequest } from "../lib/request-log.mjs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
@@ -763,19 +764,58 @@ test("startGuiServer retries a busy port, and recovers once the old host release
   let service = null;
   try {
     // 端口一直被占：退避重试完仍然失败，错误文案里要写清试了几次（warn 会带出去）。
+    // guardIntervalMs:0 关掉后台守护，这里只验证纯前台失败的行为。
     await assert.rejects(
-      () => startGuiServer({ port, retryDelays: [10, 10, 10] }),
+      () => startGuiServer({ port, retryDelays: [10, 10, 10], guardIntervalMs: 0 }),
       (err) => /port already in use/.test(err.message) && /tried 4 time/.test(err.message),
     );
 
     // 旧 host 让出端口后再调一次就能起来 —— 这就是热更新后页面能自己恢复的原因，
     // 不用再 docker restart。
     await new Promise((resolve) => blocker.close(resolve));
-    service = await startGuiServer({ port, retryDelays: [10, 10] });
+    service = await startGuiServer({ port, retryDelays: [10] });
     const html = await (await fetch(`http://127.0.0.1:${port}/ui`)).text();
     assert.match(html, /GPTFree号池/);
   } finally {
     if (service) await service.close();
+    await stopGuiServer();
+    if (blocker.listening) await new Promise((resolve) => blocker.close(resolve));
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("startGuiServer 前台重试失败后，后台守护在端口释放后自动恢复", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-guard-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  // 占住端口，模拟「宿主热更新时旧 host 还攥着 37990」。
+  const blocker = createServer();
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  const port = blocker.address().port;
+  try {
+    // 前台只给 1 次重试：端口仍被占，必定 reject，但错误文案要标明已挂后台守护。
+    await assert.rejects(
+      () => startGuiServer({ port, retryDelays: [10], guardIntervalMs: 20, guardWindowMs: 5000 }),
+      (err) => /port already in use/.test(err.message) && /background retry scheduled/.test(err.message),
+    );
+
+    // 旧 host 让出端口 —— 后台守护应当自己把服务捞起来，无需再手动调 startGuiServer。
+    await new Promise((resolve) => blocker.close(resolve));
+
+    let recovered = false;
+    for (let i = 0; i < 120; i++) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/ui`);
+        if (res.status === 200) { recovered = true; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(recovered, "background guard should recover the GUI service once the port is free");
+  } finally {
+    await stopGuiServer();
     if (blocker.listening) await new Promise((resolve) => blocker.close(resolve));
     if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
     else process.env.MAGPIE_GPTFREE_HOME = previousHome;
@@ -835,6 +875,121 @@ test("GUI 生图错误日志：GET /api/image-errors 读最近记录，POST clea
     res = await h.api("image-errors");
     assert.equal(res.json.total, 0);
   } finally {
+    await h.close();
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- 运行面板（0.10.0） ----------
+
+test("the live dashboard exposes capacity, forecast and the request ring without leaking emails", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-live-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  clearRequestLog();
+  const alice = "live-alice@example.com";
+  const bob = "live-bob@example.com";
+  const store = createInMemoryStatsStore();
+  // alice 检测时 40、现在 30：有消耗速率和耗尽预测；bob 额度已空。
+  await recordQuotaCheck({
+    email: alice,
+    quota: 40,
+    hasImageLimit: true,
+    planType: "plus",
+    limits: [{ feature: "image_gen", remaining: 40 }, { feature: "other_tool", remaining: 9 }],
+  }, { statsStore: store });
+  await recordQuotaCheck({ email: bob, quota: 0, hasImageLimit: true, planType: "free" }, { statsStore: store });
+
+  const h = await harness({
+    poolRead: async () => [
+      { email: alice, accessToken: future(), totp: seed, password: "p1" },
+      { email: bob, accessToken: future(), totp: seed, password: "p2" },
+    ],
+    statsStore: store,
+  });
+  try {
+    // 静态：tab 在页面里，且整页没有任何外链 / CDN（沙箱 iframe 里会被 CSP 拦）。
+    assert(h.html.includes('data-tab="live"'), "运行 tab 必须在导航里");
+    assert(h.html.includes('id="livePanel"'));
+    assert(h.html.includes('id="liveRows"'));
+    // placeholder 里出现 http:// 是示例文本，真正要防的是 src/href 指向外部资源。
+    assert.doesNotMatch(h.html, /(?:src|href)="https?:\/\//, "沙箱页不能引用任何外部资源");
+    assert.doesNotMatch(h.html, /(?:src|href)="\/\//, "不能用协议相对地址绕开检查");
+    const appJs = await (await fetch(h.base + "assets/app.js")).text();
+    assert(appJs.includes('api("dashboard")'));
+    assert(appJs.includes("requests?since="));
+    assert(appJs.includes("visibilitychange"));
+    assert(!appJs.includes("innerHTML"), "沿用 textContent 拼 DOM，不引 innerHTML");
+    assert(!appJs.includes("localStorage"));
+    const styleCss = await (await fetch(h.base + "assets/style.css")).text();
+    assert(styleCss.includes(".live-row"));
+    assert(styleCss.includes(".live-table"));
+
+    // 鉴权：和 /api/stats 一样，缺 session 或跨站 Origin 一律 403。
+    assert.equal((await h.api("dashboard", undefined, { bearer: "0".repeat(64) })).status, 403);
+    assert.equal((await h.api("dashboard", undefined, { origin: "https://attacker.test" })).status, 403);
+    assert.equal((await h.api("requests", undefined, { bearer: "0".repeat(64) })).status, 403);
+
+    // 空 ring：接口仍然 200，且明确告诉前端「没数据」而不是抛错。
+    let ring = await h.api("requests?limit=10");
+    assert.equal(ring.status, 200);
+    assert.equal(ring.json.items.length, 0);
+    assert.equal(ring.json.reset, false);
+
+    const dash = await h.api("dashboard");
+    assert.equal(dash.status, 200);
+    assert.equal(dash.json.capacity.total, 2);
+    assert.equal(dash.json.capacity.active, 1);
+    // ring 空的时候成功率是 null（不是 0%），前端据此显示「—」。
+    assert.equal(dash.json.metrics.count, 0);
+    assert.equal(dash.json.metrics.successRate, null);
+    assert.equal(dash.json.metrics.inflight, 0);
+    assert.ok(Array.isArray(dash.json.forecast.items));
+    assert.ok(Array.isArray(dash.json.activity));
+    assert.ok(Array.isArray(dash.json.recent.items));
+    // 预测里只有「有检测快照 + 还有额度」的号，且不能带邮箱。
+    const raw = JSON.stringify(dash.json);
+    assert.doesNotMatch(raw, /live-alice@example\.com/);
+    assert.doesNotMatch(raw, /live-bob@example\.com/);
+    for (const row of dash.json.forecast.items) {
+      assert.match(row.slotTag, /^s[0-9a-f]{10}$/);
+    }
+    // limits 全量落盘后要能在行数据里看到（0.10.0 只观测，不派生 textQuota）。
+    const stats = await h.api("stats");
+    const limitsRow = stats.json.accounts.find((row) => row.limits && row.limits.length);
+    assert.ok(limitsRow, "带 limits 的账号行要把它暴露出来");
+    assert.deepEqual(limitsRow.limits.map((item) => item.feature).sort(), ["image_gen", "other_tool"]);
+    assert.equal(limitsRow.effectiveWeight, null, "0.10.0 还没有生效权重");
+    assert.ok(stats.json.summary.utilization);
+
+    // 写一条请求进 ring，增量拉取应该只回这一条。
+    const first = recordRequest({ kind: "image", email: alice, ok: true, ms: 4200, ttfbMs: 900, n: 1 });
+    ring = await h.api("requests?since=0&limit=10");
+    assert.equal(ring.json.items.length, 1);
+    assert.equal(ring.json.items[0].seq, first.seq);
+    assert.equal(ring.json.items[0].tag, accountSlotTag(alice));
+    assert.equal(ring.json.items[0].ttfbMs, 900);
+    assert.doesNotMatch(JSON.stringify(ring.json), /live-alice@example\.com/);
+
+    // 游标前进后没有新记录 → 空数组，不是重复推一遍。
+    const idle = await h.api(`requests?since=${first.seq}&limit=10`);
+    assert.equal(idle.json.items.length, 0);
+    assert.equal(idle.json.reset, false);
+
+    // 游标比服务端还新（进程重启）→ reset，前端整段重画。
+    const stale = await h.api("requests?since=9999&limit=10");
+    assert.equal(stale.json.reset, true);
+    assert.equal(stale.json.items.length, 1);
+
+    // 清空：GET 不认，POST 才生效。
+    assert.equal((await h.api("requests/clear")).status, 404);
+    assert.equal((await h.api("requests/clear", {})).status, 200);
+    assert.equal((await h.api("requests?limit=10")).json.items.length, 0);
+  } finally {
+    clearRequestLog();
     await h.close();
     if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
     else process.env.MAGPIE_GPTFREE_HOME = previousHome;

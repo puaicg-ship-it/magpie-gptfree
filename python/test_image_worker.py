@@ -465,6 +465,14 @@ class ImageWorkerUnitTests(unittest.TestCase):
         self.assertTrue(res["has_image_limit"])
         self.assertEqual(res["plan_type"], "free")
         self.assertEqual(res["default_model_slug"], "auto")
+        # other_tool 以前只被用来判断「有没有图额度」，本身直接被丢掉。
+        # 0.10.0 起原样保留全量快照，文本那部分额度才有据可查。
+        self.assertEqual(
+            [(item["feature"], item["remaining"]) for item in res["limits"]],
+            [("other_tool", 5), ("image_gen", 18)],
+        )
+        self.assertEqual(res["limits"][1]["reset_at"], "2026-11-10T12:00:00+00:00")
+        self.assertNotIn("reset_at", res["limits"][0])
 
         # 2. Missing image_gen entry defaults to quota 0 and keeps working even if accounts/check fails
         def empty_limits_handler(method, url, kwargs):
@@ -497,6 +505,51 @@ class ImageWorkerUnitTests(unittest.TestCase):
         self.assertFalse(res_429["ok"])
         self.assertEqual(res_429["http_status"], 429)
         self.assertEqual(res_429["retry_after"], 95)
+
+    def test_extract_all_limits_drops_junk_and_caps_the_snapshot(self):
+        # feature 名统一小写，非法的整条丢掉，而不是把上游原文写进账本。
+        limits = image_worker.OpenAIWebImageClient.extract_all_limits([
+            {"feature_name": "Image_Gen", "remaining": 7},
+            {"feature_name": "bad feature!", "remaining": 3},
+            {"feature_name": "", "remaining": 3},
+            {"feature_name": "other_tool", "remaining": "abc"},
+            {"feature_name": "x" * 41, "remaining": 1},
+            "not-a-dict",
+            None,
+        ])
+        self.assertEqual(limits, [{"feature": "image_gen", "remaining": 7}])
+
+        # remaining 缺失/null 按 0 处理，和 extract_image_quota 的口径保持一致
+        # （上游用 null 表示「这一项没有剩余」）。
+        self.assertEqual(
+            image_worker.OpenAIWebImageClient.extract_all_limits([
+                {"feature_name": "other_tool", "remaining": None},
+                {"feature_name": "text_gen"},
+            ]),
+            [
+                {"feature": "other_tool", "remaining": 0},
+                {"feature": "text_gen", "remaining": 0},
+            ],
+        )
+
+        # 非 list 一律当空，不抛异常（上游字段形状不稳定）。
+        self.assertEqual(image_worker.OpenAIWebImageClient.extract_all_limits(None), [])
+        self.assertEqual(image_worker.OpenAIWebImageClient.extract_all_limits({"a": 1}), [])
+
+        # 最多 12 条：上游返回多少都不该把账本撑大。
+        many = image_worker.OpenAIWebImageClient.extract_all_limits([
+            {"feature_name": f"f{i}", "remaining": i} for i in range(30)
+        ])
+        self.assertEqual(len(many), 12)
+        self.assertEqual(many[0]["feature"], "f0")
+
+        # 负数 remaining 夹到 0（额度被打穿时上游会这么给）。
+        self.assertEqual(
+            image_worker.OpenAIWebImageClient.extract_all_limits([
+                {"feature_name": "image_gen", "remaining": -4},
+            ]),
+            [{"feature": "image_gen", "remaining": 0}],
+        )
 
 
 

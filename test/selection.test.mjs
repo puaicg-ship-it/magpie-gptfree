@@ -603,6 +603,143 @@ test("text calls are counted separately and never pollute the image counters", a
   assert.equal(snap.accounts[0].textSuccessCalls, 2);
 });
 
+// ---------- 0.10.0 观测字段（只记录与展示，不参与排序） ----------
+
+// 上游 limits_progress 里除了 image_gen 还有别的 feature（文本、other_tool…），
+// 以前只抠 image_gen 那一项，其余直接扔了。0.10.0 先把全量存下来，等 0.11.0
+// 再决定怎么用 —— 所以这里只验证「存得住、存得干净」，不验证任何调度行为。
+test("the full upstream limits_progress snapshot is persisted, cleaned and capped", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "limits@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordQuotaCheck({
+    email,
+    quota: 18,
+    limits: [
+      { feature: "image_gen", remaining: 18, resetAt: "2026-01-01T00:00:00.000Z" },
+      { feature: "Text_Gen", remaining: 40 },
+      // 下面这些都应该被丢掉：feature 非法、remaining 不是数字、不是对象。
+      { feature: "bad feature!", remaining: 3 },
+      { feature: "", remaining: 3 },
+      { feature: "other_tool", remaining: "abc" },
+      null,
+      42,
+    ],
+  }, { statsStore: store });
+
+  const rec = store.state.accounts[tag];
+  assert.deepEqual(rec.limits.map((item) => item.feature), ["image_gen", "text_gen"],
+    "feature 统一小写，非法项直接丢");
+  assert.equal(rec.limits[0].remaining, 18);
+  assert.equal(rec.limits[0].resetAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(rec.limits[1].resetAt, undefined);
+  assert.equal(rec.quotaAtCheck, 18);
+
+  // 只保留最近 12 项：上游返回多少都不该把账本撑大。
+  await recordQuotaCheck({
+    email,
+    quota: 18,
+    limits: Array.from({ length: 30 }, (_, i) => ({ feature: `f${i}`, remaining: i })),
+  }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].limits.length, 12);
+
+  // 不传 limits（比如上游没给）时保留上一次的快照，不要清空。
+  await recordQuotaCheck({ email, quota: 18 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].limits.length, 12);
+
+  const snap = summarizePoolStats([account(email)], store.state);
+  assert.equal(snap.accounts[0].limits.length, 12, "行数据里也要带上 limits");
+  assert.equal(snap.accounts[0].quotaAtCheck, 18);
+});
+
+test("average latency and TTFB are smoothed per account without polluting failure counters", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "latency@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordImageCall({ email, success: true, ms: 20000, ttfbMs: 4000 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].avgImageMs, 20000);
+  assert.equal(store.state.accounts[tag].ttfbP50Ms, 4000);
+  assert.equal(store.state.accounts[tag].imageSamples, 1);
+
+  // EWMA 0.7/0.3：一次特别慢的样本不该把均值直接拉满。
+  await recordImageCall({ email, success: true, ms: 60000, ttfbMs: 8000 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].avgImageMs, 32000);
+  assert.equal(store.state.accounts[tag].ttfbP50Ms, 5200);
+  assert.equal(store.state.accounts[tag].imageSamples, 2);
+
+  // 失败样本没有可比耗时，不能污染均值。
+  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].avgImageMs, 32000);
+  assert.equal(store.state.accounts[tag].imageSamples, 2);
+
+  const snap = summarizePoolStats([account(email)], store.state);
+  assert.equal(snap.accounts[0].avgImageMs, 32000);
+  assert.equal(snap.accounts[0].ttfbP50Ms, 5200);
+});
+
+test("a text rate limit records a cooldown that a later success clears", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "textcool@example.com";
+  const tag = accountSlotTag(email);
+
+  await recordTextCall({
+    email,
+    success: false,
+    error: "rate_limit_exceeded",
+    rateLimited: true,
+    retryAfter: 600,
+  }, { statsStore: store });
+  const limited = Date.parse(store.state.accounts[tag].textLimitedUntil || "");
+  assert.ok(limited > Date.now() + 500_000, "retry_after 600 秒要落成约 10 分钟的冷却");
+  assert.equal(store.state.accounts[tag].textConsecutiveFails, 1);
+
+  let snap = summarizePoolStats([account(email)], store.state);
+  assert.equal(snap.accounts[0].textStatus, "limited");
+  assert.equal(snap.quotaStats.textLimited, 1);
+
+  await recordTextCall({ email, success: true, ms: 1200 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].textLimitedUntil, null, "成功要把冷却清掉");
+  assert.equal(store.state.accounts[tag].textConsecutiveFails, 0);
+  assert.equal(store.state.accounts[tag].avgTextMs, 1200);
+
+  snap = summarizePoolStats([account(email)], store.state);
+  assert.equal(snap.accounts[0].textStatus, "available");
+  assert.equal(snap.quotaStats.textLimited, 0);
+});
+
+// 没写 retry_after 的 429 也要有冷却，否则下一轮会立刻再打一次。
+test("a text rate limit without retry_after still gets the default cooldown", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "textcool2@example.com";
+  const tag = accountSlotTag(email);
+  await recordTextCall(
+    { email, success: false, error: "rate_limit_exceeded", rateLimited: true },
+    { statsStore: store },
+  );
+  const limited = Date.parse(store.state.accounts[tag].textLimitedUntil || "");
+  assert.ok(limited > Date.now(), "缺省也该有冷却");
+  assert.ok(limited < Date.now() + 3_600_000, "缺省冷却不该超过一小时");
+});
+
+// 0.10.0 只观测：tier / 权重都还不存在，effectiveWeight 必须是 null，
+// 否则 0.11.0 接权重时看不出「这个值到底有没有生效」。
+test("the 0.10.0 snapshot exposes observation fields but no effective weight", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "obs@example.com";
+  await recordImageCall({ email, success: true, ms: 30000, ttfbMs: 5000 }, { statsStore: store });
+  const snap = summarizePoolStats([account(email)], store.state);
+  const row = snap.accounts[0];
+  assert.equal(row.effectiveWeight, null);
+  assert.equal(row.tier, undefined, "0.10.0 不推断分级");
+  assert.equal(row.burnRatePerHour, null, "没有额度检测快照就谈不上消耗速率");
+  assert.equal(row.etaExhaustMs, null);
+  assert.deepEqual(row.limits, []);
+  assert.ok("textStatus" in row);
+  assert.ok("utilization" in snap.quotaStats);
+});
+
 // 一个只能答话、画不了图的号仍然该被判死：文本成功不能把它从 never 里捞出来。
 test("a text-only account is still a dead image account", async () => {
   const store = createInMemoryStatsStore();

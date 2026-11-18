@@ -481,6 +481,9 @@
     dependencies_missing: "Worker 环境缺失",
     quota_exhausted: "额度用尽",
     rate_limited: "被上游限流",
+    rate_limit_exceeded: "被上游限流",
+    usage_limit_reached: "用量上限已到",
+    insufficient_quota: "额度不足",
     content_policy_violation: "提示词被拒",
     invalid_image: "图片不合规",
     upstream_bad_request: "上游拒绝请求",
@@ -808,6 +811,8 @@
     // 所以这里顺手渲染，切过去就是对的，不用再等一次请求。
     adoptSettings();
     renderSettings();
+    // 运行页的账号列依赖 slotLabelMap()，快照到了要补画一次（见 renderLiveLabels）。
+    if (activeTab === "live") renderLiveLabels();
   }
 
   // 一个账号都没有时，六个统计数字全是 0，看起来像页面坏了。这里给一条明确的路：
@@ -2041,7 +2046,9 @@
   function errorPillClass(code) {
     const value = String(code || "");
     if (/banned|token_invalid|unauthorized|reauth_failed/.test(value)) return "bad";
-    if (/rate_limited|quota|timeout|text_reply|upstream_error/.test(value)) return "warn";
+    // 上游的限流码不止 rate_limited 一种（rate_limit_exceeded / too_many_requests…），
+    // 只匹配 rate_limited 会让最常见的 429 掉成灰色 neutral。
+    if (/rate_limit|too_many_requests|quota|timeout|text_reply|upstream_error/.test(value)) return "warn";
     return "neutral";
   }
 
@@ -2395,6 +2402,316 @@
     }
   }
 
+  // ---------- 运行面板（实时） ----------
+  // 数据源两个：
+  //   /api/dashboard —— 全量快照（容量、15 分钟指标、预测、活跃度）+ 最近 30 条日志
+  //   /api/requests  —— 按 seq 游标增量拉取，纯内存，每 2 秒一次
+  // 只在「运行」页且勾了「实时」且页面可见时才轮询，切走立刻停，不留后台请求。
+  const liveState = {
+    seq: 0, rows: [], timer: null, loading: false, polling: false,
+    since: null, pid: null, updatedAt: 0, payload: null,
+  };
+  const LIVE_POLL_MS = 2000;
+  const LIVE_ROW_CAP = 150;
+
+  function liveSecs(ms) {
+    const n = Number(ms);
+    return Number.isFinite(n) && n >= 0 ? (n / 1000).toFixed(1) + "s" : "—";
+  }
+  // formatDuration 按分钟取整，几十秒的预测会显示成「0 分钟」，这里兜一下。
+  function liveEtaText(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    if (n < 60_000) return "不到 1 分钟";
+    return formatDuration(n);
+  }
+  function livePct(ratio) {
+    return typeof ratio === "number" && Number.isFinite(ratio) ? Math.round(ratio * 100) + "%" : "—";
+  }
+
+  function liveStatusText() {
+    const bits = [];
+    if (liveState.updatedAt) {
+      bits.push("更新于 " + new Date(liveState.updatedAt).toLocaleTimeString());
+    }
+    if (liveState.pid) bits.push("进程 #" + liveState.pid);
+    // ring 是进程内的：重启就清空，所以必须把「从什么时候开始记的」写出来，
+    // 否则看到 0 条会以为没请求，其实只是刚重启。
+    if (liveState.since) bits.push("自 " + formatShortTime(new Date(liveState.since).toISOString()) + " 起");
+    if (liveState.seq) bits.push(`累计 ${liveState.seq} 条`);
+    return bits.join(" · ");
+  }
+
+  function renderLiveCards(data) {
+    const host = $("liveCards");
+    host.replaceChildren();
+    const cap = data?.capacity || {};
+    const metrics = data?.metrics || {};
+    const util = data?.utilization || {};
+    host.append(
+      imageStatCard(
+        "可用账号",
+        `${cap.active ?? 0} / ${cap.total ?? 0}`,
+        `限流 ${cap.limited ?? 0} · 失效 ${cap.dead ?? 0} · 未检测 ${cap.unchecked ?? 0}`,
+        "◎",
+      ),
+      imageStatCard(
+        "成功率 15 分钟",
+        livePct(metrics.successRate),
+        `${metrics.ok ?? 0} 成 / ${metrics.fail ?? 0} 败`,
+        "✓",
+      ),
+      imageStatCard(
+        "P95 耗时",
+        liveSecs(metrics.p95),
+        `P50 ${liveSecs(metrics.p50)} · 首字 P95 ${liveSecs(metrics.ttfbP95)}`,
+        "⏱",
+      ),
+      imageStatCard(
+        "在飞请求",
+        String(metrics.inflight ?? 0),
+        "图片链路正在处理中的请求数",
+        "⇄",
+      ),
+      imageStatCard(
+        "额度利用率",
+        livePct(util.ratio),
+        util.atCheck ? `剩 ${util.remaining} / 检测时 ${util.atCheck}` : "还没有额度检测快照",
+        "▤",
+      ),
+      imageStatCard(
+        "文本限流",
+        String(cap.textLimited ?? 0),
+        `文本 ${cap.totalTextSuccess ?? 0} 成 / ${cap.totalTextFail ?? 0} 败`,
+        "T",
+      ),
+    );
+  }
+
+  // 预测 / 活跃度都是「一条 = 名称 + 数值 + 备注 + 横条」，共用一个渲染器。
+  function liveBarRow({ label, title, value, note, noteTitle, ratio, warn }) {
+    const row = el("div", "live-row");
+    const name = el("div", "fail-label", label);
+    if (title) name.title = title;
+    const num = el("div", "live-num", value);
+    const tail = el("div", "live-note", note);
+    if (noteTitle) tail.title = noteTitle;
+    const track = el("div", "live-track");
+    const fill = el("div", "live-fill" + (warn ? " warn" : ""));
+    fill.style.width = Math.max(4, Math.min(100, Math.round(ratio * 100))) + "%";
+    track.append(fill);
+    row.append(name, num, tail, track);
+    return row;
+  }
+
+  function renderLiveForecast(data) {
+    const host = $("liveForecast");
+    host.replaceChildren();
+    const items = Array.isArray(data?.forecast?.items) ? data.forecast.items : [];
+    const count = Number(data?.forecast?.count) || 0;
+    $("liveForecastInfo").textContent = count ? `${count} 个号有耗尽预测` : "";
+    if (!items.length) {
+      host.append(el("div", "insight-empty",
+        "暂无预测。需要「检测时的额度」和「当前额度」有差值，且近 6 小时内有消耗。"));
+      return;
+    }
+    const labels = slotLabelMap();
+    const maxQuota = Math.max(...items.map((item) => Number(item.imageQuota) || 0), 1);
+    for (const item of items) {
+      const name = labels.get(item.slotTag) || item.slotLabel || item.slotTag || "—";
+      host.append(liveBarRow({
+        label: name,
+        title: item.slotTag,
+        value: `剩 ${item.imageQuota}`,
+        note: liveEtaText(item.etaExhaustMs),
+        noteTitle: `预计 ${formatShortTime(item.etaAt)} 耗尽` +
+          (item.burnRatePerHour ? ` · 约 ${item.burnRatePerHour} 次/小时` : ""),
+        ratio: (Number(item.imageQuota) || 0) / maxQuota,
+        // 一小时以内要打空的标红：这时候该去补号或者调整分流了。
+        warn: Number(item.etaExhaustMs) < 3_600_000,
+      }));
+    }
+  }
+
+  function renderLiveActivity(data) {
+    const host = $("liveActivity");
+    host.replaceChildren();
+    const rows = Array.isArray(data?.activity) ? data.activity : [];
+    $("liveActivityInfo").textContent = rows.length ? `近 1 小时 · ${rows.length} 个账号` : "";
+    if (!rows.length) {
+      host.append(el("div", "insight-empty", "近 1 小时没有请求记录（进程重启后计数会清零）。"));
+      return;
+    }
+    const labels = slotLabelMap();
+    const top = Math.max(...rows.map((row) => Number(row.count) || 0), 1);
+    for (const row of rows) {
+      host.append(liveBarRow({
+        label: labels.get(row.tag) || row.tag,
+        title: row.tag,
+        value: String(row.count),
+        note: `${row.ok}/${row.count}` + (row.avgMs ? ` · ${liveSecs(row.avgMs)}` : ""),
+        noteTitle: `成功 ${row.ok} · 失败 ${row.fail}` +
+          (row.avgMs ? ` · 平均 ${row.avgMs}ms` : ""),
+        ratio: (Number(row.count) || 0) / top,
+        warn: Number(row.fail) > Number(row.ok),
+      }));
+    }
+  }
+
+  function renderLiveRows() {
+    const body = $("liveRows");
+    if (!body) return;
+    body.replaceChildren();
+    // 新的在最上面：排查时看的是「刚刚发生了什么」。
+    const rows = liveState.rows.slice().reverse();
+    $("liveLogInfo").textContent = rows.length
+      ? `最近 ${rows.length} 条 · 内存环形缓冲，进程重启即清空`
+      : "";
+    if (!rows.length) {
+      const tr = el("tr", "empty-row");
+      const td = el("td", "", "还没有请求。图片或文本请求经过本插件后，这里会实时出现一条。");
+      td.colSpan = 6;
+      tr.append(td);
+      body.append(tr);
+      return;
+    }
+    const labels = slotLabelMap();
+    for (const entry of rows) {
+      const tr = el("tr");
+
+      const time = el("td", "log-time", formatShortTime(entry.at));
+      time.title = entry.at;
+
+      const kind = el("td");
+      kind.append(el("span", "pill " + (entry.kind === "text" ? "plan" : "neutral"),
+        entry.kind === "text" ? "文本" : "图片"));
+
+      const acct = el("td");
+      const name = el("span", "acct-name", labels.get(entry.tag) || entry.tag || "—");
+      if (entry.tag) name.title = entry.tag;
+      acct.append(name);
+
+      const result = el("td");
+      const pill = el("span", "pill " + (entry.ok ? "good" : errorPillClass(entry.code)),
+        entry.ok ? "成功" : (errorLabel(entry.code) || entry.code || "失败"));
+      const hint = entry.ok ? "" : errorHint(entry.code);
+      if (hint) pill.title = hint;
+      result.append(pill);
+
+      const cost = el("td", "log-num" + (typeof entry.ms === "number" ? "" : " zero"),
+        typeof entry.ms === "number" ? liveSecs(entry.ms) : "—");
+      if (typeof entry.ttfbMs === "number") {
+        cost.append(el("div", "cell-sub", "首字 " + liveSecs(entry.ttfbMs)));
+      }
+
+      const detail = el("td", "log-args");
+      const bits = [];
+      if (entry.model) bits.push(entry.model);
+      if (entry.n) bits.push(`${entry.n} 张`);
+      if (entry.attempt) bits.push(`第 ${entry.attempt} 次`);
+      if (entry.status) bits.push(`HTTP ${entry.status}`);
+      if (entry.upstreamStatus && entry.upstreamStatus !== entry.status) {
+        bits.push(`上游 ${entry.upstreamStatus}`);
+      }
+      detail.textContent = bits.join(" · ") || "—";
+      if (entry.requestId) detail.title = "request " + entry.requestId;
+
+      tr.append(time, kind, acct, result, cost, detail);
+      body.append(tr);
+    }
+  }
+
+  // 增量合并：reset 表示服务端 seq 比我们的游标还小（进程重启过），整段替换。
+  function applyRequestBatch(payload) {
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    if (payload?.reset) {
+      liveState.rows = items.slice();
+    } else if (items.length) {
+      liveState.rows = liveState.rows.concat(items);
+    }
+    if (liveState.rows.length > LIVE_ROW_CAP) {
+      liveState.rows = liveState.rows.slice(-LIVE_ROW_CAP);
+    }
+    const seq = Number(payload?.seq);
+    if (Number.isFinite(seq)) liveState.seq = seq;
+    if (payload?.since) liveState.since = payload.since;
+    if (payload?.pid) liveState.pid = payload.pid;
+    renderLiveRows();
+    $("liveStatus").textContent = liveStatusText();
+  }
+
+  async function loadDashboard() {
+    const payload = await api("dashboard");
+    liveState.payload = payload;
+    liveState.updatedAt = Date.now();
+    renderLiveCards(payload);
+    renderLiveForecast(payload);
+    renderLiveActivity(payload);
+    const recent = payload?.recent || {};
+    liveState.rows = Array.isArray(recent.items) ? recent.items.slice() : [];
+    liveState.seq = Number(recent.seq) || 0;
+    liveState.since = recent.since || null;
+    liveState.pid = recent.pid || null;
+    renderLiveRows();
+    $("liveStatus").textContent = liveStatusText();
+  }
+
+  async function pollLiveRequests() {
+    // 全量刷新在跑时先跳过这一拍：否则旧游标拉回来的增量会被全量结果覆盖。
+    if (liveState.polling || liveState.loading) return;
+    liveState.polling = true;
+    try {
+      applyRequestBatch(await api(`requests?since=${liveState.seq}&limit=100`));
+    } catch (error) {
+      // 轮询失败不弹全局错误条：多半是插件服务正在重启，下一次自己会好。
+      $("liveStatus").textContent = error.message || "实时日志拉取失败";
+    } finally {
+      liveState.polling = false;
+    }
+  }
+
+  // 页面直接落在「运行」页时，setup() 先 tab() 再 refreshData()，此时 snapshot 还是
+  // null，slotLabelMap() 为空 —— 账号列只能显示 s<sha10> 槽位号。等 /api/stats 回来
+  // 后重画一次，把邮箱标签补上；轮询只推新行，不会自己修好预测/活跃度两块。
+  function renderLiveLabels() {
+    if (!liveState.payload) return;
+    renderLiveForecast(liveState.payload);
+    renderLiveActivity(liveState.payload);
+    renderLiveRows();
+  }
+
+  function stopLive() {
+    if (liveState.timer) {
+      clearInterval(liveState.timer);
+      liveState.timer = null;
+    }
+  }
+
+  function liveWanted() {
+    return activeTab === "live" && $("liveAuto")?.checked === true && !document.hidden;
+  }
+
+  // 只负责开/关定时器；数据拉取由 startLive（全量）和 pollLiveRequests（增量）负责。
+  function syncLive() {
+    stopLive();
+    if (!liveWanted()) return;
+    liveState.timer = setInterval(pollLiveRequests, LIVE_POLL_MS);
+  }
+
+  async function startLive() {
+    if (liveState.loading) return;
+    liveState.loading = true;
+    try {
+      await loadDashboard();
+    } catch (error) {
+      $("liveStatus").textContent = error.message || "运行数据加载失败";
+      return;
+    } finally {
+      liveState.loading = false;
+    }
+    syncLive();
+  }
+
   function tab(next) {
     activeTab = next;
     document.querySelectorAll(".tab").forEach((button) => {
@@ -2404,6 +2721,7 @@
     });
     hidden("overviewPanel", next !== "stats");
     hidden("importPanel", next !== "import");
+    hidden("livePanel", next !== "live");
     hidden("imagesPanel", next !== "images");
     hidden("settingsPanel", next !== "settings");
     // 导入页没有对应的 tab —— 它是导航右侧那个按钮。这里给按钮加个「正在这里」的圈，
@@ -2416,6 +2734,9 @@
       loadCleanupLog();
       loadImageErrorLog();
     }
+    // 运行页每 2 秒轮询一次，切走必须立刻停，否则会在后台一直打本地服务。
+    if (next === "live") startLive();
+    else stopLive();
   }
 
   function setup() {
@@ -2431,6 +2752,16 @@
     $("goImport").addEventListener("click", openImport);
     $("goImportEmpty")?.addEventListener("click", openImport);
     $("goSettingsFromImages")?.addEventListener("click", () => tab("settings"));
+
+    // 运行面板：刷新 = 重新拉一次全量快照；实时开关只控制增量轮询。
+    $("liveRefresh")?.addEventListener("click", () => { void startLive(); });
+    $("liveAuto")?.addEventListener("change", () => syncLive());
+    // 页面切到后台就停轮询（iframe 被隐藏时定时器还在跑，白打本地服务）；
+    // 回到前台重新拉全量，避免只看到增量、错过这期间的全局变化。
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopLive();
+      else if (activeTab === "live") void startLive();
+    });
 
     $("checkPaste").addEventListener("click", async () => {
       if (busy) return;

@@ -1127,6 +1127,40 @@ class OpenAIWebImageClient:
                     return quota, restore_at, True
         return 0, None, False
 
+    @staticmethod
+    def extract_all_limits(limits_progress: Any) -> list[dict]:
+        """把上游 limits_progress 全量转成 [{feature, remaining, reset_at}]。
+
+        以前只认 image_gen，其余 feature（other_tool 等）的 remaining 直接丢弃 ——
+        那部分额度在账本里根本不存在。这里原样保留（最多 12 条），feature 名走
+        白名单，避免把上游内部 id 或文案写进账本。派生「哪个 feature 算文本额度」
+        是策略，放在 JS 侧做，Python 只负责如实上报。
+        """
+        out: list[dict] = []
+        if not isinstance(limits_progress, list):
+            return out
+        for item in limits_progress:
+            if not isinstance(item, dict):
+                continue
+            feature = str(item.get("feature_name") or "").strip().lower()
+            if not feature or len(feature) > 40:
+                continue
+            if not all(ch.isalnum() or ch in "_.-" for ch in feature):
+                continue
+            raw_remaining = item.get("remaining")
+            try:
+                remaining = max(0, int(raw_remaining if raw_remaining is not None else 0))
+            except (TypeError, ValueError):
+                continue
+            entry = {"feature": feature, "remaining": remaining}
+            reset_at = str(item.get("reset_after") or "").strip()
+            if reset_at:
+                entry["reset_at"] = reset_at
+            out.append(entry)
+            if len(out) >= 12:
+                break
+        return out
+
     def check_image_quota(self, *, timezone_offset_min: int = -480) -> Dict[str, Any]:
         init_path = "/backend-api/conversation/init"
         init_resp = self.session.post(
@@ -1157,6 +1191,7 @@ class OpenAIWebImageClient:
             )
 
         quota, restore_at, has_image_limit = self.extract_image_quota(init_payload.get("limits_progress"))
+        limits = self.extract_all_limits(init_payload.get("limits_progress"))
         default_model_slug = str(init_payload.get("default_model_slug") or "").strip() or None
 
         plan_type = ""
@@ -1187,6 +1222,8 @@ class OpenAIWebImageClient:
             "has_image_limit": has_image_limit,
             "plan_type": plan_type or None,
             "default_model_slug": default_model_slug,
+            # 全量 limits（含非 image_gen 的 feature），供 JS 侧观测与后续派生。
+            "limits": limits,
             "checked_at": int(time.time()),
         }
 

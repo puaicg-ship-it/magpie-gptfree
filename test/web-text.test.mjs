@@ -14,6 +14,8 @@ import {
   extractWebTextRequest,
   runWebTextWorker,
 } from "../lib/chatgpt-web-text.mjs";
+import { createInMemoryStatsStore, recordTextCall } from "../lib/pool-stats.mjs";
+import { accountSlotTag } from "../lib/pool-connection.mjs";
 
 function makeJwt(claims) {
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
@@ -238,6 +240,122 @@ test("executeWebTextGeneration reports every account attempt for the stats ledge
     ["bad@example.com", false, "rate_limit_exceeded"],
     ["good@example.com", true, ""],
   ]);
+  clearTextCooldowns();
+});
+
+// 文本链路的限流冷却原本只存在进程内的 Map 里：插件宿主每小时热更新一次，
+// 冷却就跟着没了，下一个请求还会先打那个正在限流的号。现在把 textLimitedUntil
+// 写进账本，重启后从账本读回来，排序照样把冷却中的号排到最后。
+test("a text 429 cooldown survives a restart by being read back from the ledger", async () => {
+  clearTextCooldowns();
+  const store = createInMemoryStatsStore();
+  const bad = platformJwt(3600, "cooled@example.com");
+  const good = platformJwt(3600, "healthy@example.com");
+  const accounts = [
+    { email: "cooled@example.com", accessToken: bad },
+    { email: "healthy@example.com", accessToken: good },
+  ];
+  const worker = async (payload) => (
+    payload.access_token === bad
+      ? { ok: false, http_status: 429, error_code: "rate_limit_exceeded", error: "slow down", retry_after: 300 }
+      : { ok: true, text: "ok" }
+  );
+
+  // codex-pool 的 recordText 就是这样把 onAttempt 转成账本写入的。
+  // executeWebTextGeneration 自己只负责内存冷却，持久化走这条回调。
+  const makeRecorder = (order) => {
+    const writes = [];
+    return {
+      order,
+      writes,
+      onAttempt: (account, outcome = {}) => {
+        order.push(account.email);
+        writes.push(recordTextCall({
+          email: account.email,
+          success: outcome.ok === true,
+          error: outcome.ok === true ? "" : (outcome.code || ""),
+          rateLimited: outcome.rateLimited === true,
+          retryAfter: outcome.retryAfter ?? null,
+        }, { statsStore: store }));
+      },
+    };
+  };
+
+  const first = makeRecorder([]);
+  await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    accounts,
+    { worker, textStats: store.state, onAttempt: first.onAttempt },
+  );
+  await Promise.all(first.writes);
+  assert.deepEqual(first.order, ["cooled@example.com", "healthy@example.com"]);
+
+  const tag = accountSlotTag("cooled@example.com");
+  const until = Date.parse(store.state.accounts[tag].textLimitedUntil || "");
+  assert.ok(until > Date.now(), "429 的冷却必须落到账本的 textLimitedUntil 上");
+  assert.equal(store.state.accounts[tag].textConsecutiveFails, 1);
+
+  // 模拟宿主热更新：进程内 Map 清空，只剩账本。
+  clearTextCooldowns();
+
+  const second = makeRecorder([]);
+  await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    accounts,
+    { worker, textStats: store.state, onAttempt: second.onAttempt },
+  );
+  await Promise.all(second.writes);
+  // 冷却中的号被排到最后：healthy 先上并且成了，cooled 根本轮不到。
+  assert.equal(second.order[0], "healthy@example.com",
+    "重启后冷却中的号应该被排到最后，而不是又第一个挨打");
+  assert.ok(!second.order.includes("cooled@example.com"), "healthy 成功就不该再打冷却中的号");
+
+  // 不传账本时确实会退回「内存里没冷却」的老行为 —— 说明起作用的是持久化那份。
+  clearTextCooldowns();
+  const withoutLedger = makeRecorder([]);
+  await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    accounts,
+    { worker, onAttempt: withoutLedger.onAttempt },
+  );
+  await Promise.all(withoutLedger.writes);
+  assert.deepEqual(withoutLedger.order, ["cooled@example.com", "healthy@example.com"]);
+
+  clearTextCooldowns();
+});
+
+// 冷却到期就该放回去，否则账本里一条过期的 textLimitedUntil 会永久压低这个号。
+test("an expired textLimitedUntil no longer pushes the account back", async () => {
+  clearTextCooldowns();
+  const store = createInMemoryStatsStore();
+  const cooled = platformJwt(3600, "expired@example.com");
+  const fresh = platformJwt(3600, "fresh@example.com");
+  const tag = accountSlotTag("expired@example.com");
+  await recordTextCall(
+    { email: "expired@example.com", success: false, error: "rate_limit_exceeded", rateLimited: true, retryAfter: 1 },
+    { statsStore: store },
+  );
+  // 直接把冷却时间改成过去，等价于「等它自然过期」。
+  store.state.accounts[tag].textLimitedUntil = new Date(Date.now() - 1000).toISOString();
+
+  const order = [];
+  await executeWebTextGeneration(
+    JSON.stringify({ model: "gpt-5.6-luna", input: "hi", stream: false }),
+    [
+      { email: "expired@example.com", accessToken: cooled },
+      { email: "fresh@example.com", accessToken: fresh },
+    ],
+    {
+      textStats: store.state,
+      onAttempt: (account) => order.push(account.email),
+      worker: async (payload) => (
+        payload.access_token === cooled
+          ? { ok: true, text: "ok" }
+          : { ok: true, text: "ok" }
+      ),
+    },
+  );
+  assert.deepEqual(order, ["expired@example.com"], "过期的冷却不该影响排序");
   clearTextCooldowns();
 });
 
