@@ -13,6 +13,7 @@ import {
   accountDeadReason,
   createInMemoryStatsStore,
   failCooldownMs,
+  hangCooldownMs,
   isAccountCoolingDown,
   isAccountDead,
   recordImageCall,
@@ -258,21 +259,71 @@ test("three consecutive failures open a cooldown that a success clears", async (
   assert.equal(isAccountCoolingDown(email, store.state), false);
 });
 
-test("a single worker_timeout parks the account for five minutes", async () => {
+// 0.12.1：卡死改成按「连续卡死次数」升级的独立阶梯，不再「按两次失败计 + 固定 5 分钟」。
+// 5 分钟太短：一个真卡死的号一小时能回来捣乱十几次，每次白烧掉整条 lane 的预算。
+test("consecutive hangs escalate 0 → 30min → 2h, and a success resets them", async () => {
   const store = createInMemoryStatsStore();
   const email = "hang@example.com";
+  const tag = accountSlotTag(email);
+  const coolFor = () => {
+    const until = Date.parse(store.state.accounts[tag].cooldownUntil || "");
+    return Number.isFinite(until) ? Math.round((until - Date.now()) / 60_000) : 0;
+  };
 
+  // 第一次卡死：只记 streak，不隔离（可能只是上游抖一下）
   await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
-  const entry = store.state.accounts[accountSlotTag(email)];
-  // 一次卡死按两次失败计：不用攒到三次才冷却。
-  assert.equal(entry.consecutiveFails, 2);
-  assert(entry.cooldownUntil, "one hang is enough to cool it down");
+  assert.equal(store.state.accounts[tag].hangStreak, 1);
+  assert.equal(store.state.accounts[tag].cooldownUntil, null, "一次卡死不该直接隔离");
+  assert.equal(isAccountCoolingDown(email, store.state), false);
+
+  // 第二次连续卡死：30 分钟
+  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].hangStreak, 2);
+  assert(Math.abs(coolFor() - 30) <= 1, `第二次应冷却 30 分钟，实际 ${coolFor()}`);
   assert.equal(isAccountCoolingDown(email, store.state), true);
 
-  // 普通失败一次不冷却，两次也不冷却 —— 只有卡死有这条快车道。
-  const plain = "plain@example.com";
-  await recordImageCall({ email: plain, success: false, error: "upstream_error" }, { statsStore: store });
-  assert.equal(isAccountCoolingDown(plain, store.state), false);
+  // 第三次：2 小时
+  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].hangStreak, 3);
+  assert(Math.abs(coolFor() - 120) <= 1, `第三次应冷却 2 小时，实际 ${coolFor()}`);
+
+  // 一次成功全部清零，冷却也解掉
+  await recordImageCall({ email, success: true, ms: 12000 }, { statsStore: store });
+  assert.equal(store.state.accounts[tag].hangStreak, 0);
+  assert.equal(store.state.accounts[tag].cooldownUntil, null);
+});
+
+// 冷却只能延长不能缩短：否则 2 小时的卡死隔离会被后一次普通失败覆盖成 10 分钟。
+test("a later ordinary failure never shortens an existing hang isolation", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "hangkeep@example.com";
+  const tag = accountSlotTag(email);
+  for (let i = 0; i < 3; i++) {
+    await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  }
+  const isolated = Date.parse(store.state.accounts[tag].cooldownUntil);
+  assert.ok(isolated - Date.now() > 100 * 60_000, "先被隔离 2 小时");
+
+  await recordImageCall({ email, success: false, error: "upstream_error" }, { statsStore: store });
+  const after = Date.parse(store.state.accounts[tag].cooldownUntil);
+  assert.ok(after >= isolated, "普通失败不能把隔离时间缩短");
+});
+
+test("the hang ladder is a pure function and caps out at two hours", () => {
+  assert.equal(hangCooldownMs(0), 0);
+  assert.equal(hangCooldownMs(1), 0);
+  assert.equal(hangCooldownMs(2), 30 * 60 * 1000);
+  assert.equal(hangCooldownMs(3), 2 * 60 * 60 * 1000);
+  assert.equal(hangCooldownMs(9), 2 * 60 * 60 * 1000, "再多次也不会无限涨");
+});
+
+test("a single ordinary failure still does not cool the account down", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "plain@example.com";
+  await recordImageCall({ email, success: false, error: "upstream_error" }, { statsStore: store });
+  assert.equal(isAccountCoolingDown(email, store.state), false);
+  assert.equal(store.state.accounts[accountSlotTag(email)].consecutiveFails, 1,
+    "普通失败只算一次（卡死不再按两次计）");
 });
 
 test("cooldown backs off with the failure streak and is capped at an hour", () => {
