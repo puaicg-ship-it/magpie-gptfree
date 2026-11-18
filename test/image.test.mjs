@@ -1031,7 +1031,12 @@ test("a streaming request answers immediately with keepalives, then the content"
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const first = decoder.decode((await reader.read()).value);
-    assert.match(first, /^: keepalive/, "第一帧就要是 keepalive，不能等图出来");
+    // 第一帧必须是 **data:** 帧 —— 客户端等的是 data 帧，注释帧对它等于没数据。
+    // 实测客户端 5 秒左右就重发了一次请求，就是因为它只看到注释帧。
+    assert.match(first, /^data: /, "第一帧要是 data 帧，不能只是注释帧");
+    const firstJson = JSON.parse(first.slice("data: ".length).trim());
+    assert.equal(firstJson.choices[0].delta.role, "assistant");
+    assert.equal(firstJson.choices[0].delta.content, undefined, "role 帧不带内容");
 
     let rest = "";
     for (;;) {
