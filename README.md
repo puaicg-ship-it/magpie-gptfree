@@ -13,6 +13,7 @@
 > | 选号 | 按剩余额度加权轮转（nginx smooth WRR）+ 连续失败熔断（10min→1h）+ 额度归零后按上游重置时间自动复检 |
 > | 判死 | 四条规则（`auth` / `never` / `stale` / `marked`），分类计数，可整组复检或删除 |
 > | 请求预算 | **单账号 60s 没出图就换号**；整单只在天花板（10 分钟）或所有账号都试完时才收手，不会因为「等了 150 秒」就报失败 |
+> | 图片桥 | 流式请求**立刻返回**（首帧 41ms）+ 每 5 秒 keepalive，长任务不会让客户端误判成死连接 |
 > | 图片桥 | 新增 `lib/chat-image-bridge.mjs`，把 `chat/completions` 上的图片模型桥到 `/images/generations`；正文默认「内联图 + 一行裸地址」，面板里可切；`n>1` 并发多打几次真的出多张（部分成功也返回） |
 > | 图片管理 | 面板「图片」tab：总张数 / 总占用 / 近 14 天柱状图、排序与日期筛选、分页缩略图（**列表 / 网格两种视图**）；勾选 / 拖动框选 / Shift 连选后批量删除。保留天数（1–90，默认 7 天）、自动清理时段（默认全天）、「立即清理早于 N 天」和**清理日志**都在「设置」tab |
 > | 统计 | 按天记成功/失败（生图与文本分开）、失败原因分布、限流起止时间；趋势图可在 **按日 / 按周 / 按月 / 按年** 之间切换（账本保留 400 天） |
@@ -39,7 +40,7 @@
 [![Magpie](https://img.shields.io/badge/Magpie-Plugin-3177d9)](https://github.com/yetone/magpie)
 [![license](https://img.shields.io/badge/license-MIT-16845c)](./LICENSE)
 [![changelog](https://img.shields.io/badge/changelog-%E6%9B%B4%E6%96%B0%E8%AE%B0%E5%BD%95-6f7d91)](./CHANGELOG.md)
-[![version](https://img.shields.io/badge/version-0.12.1-0f6e56)](./package.json)
+[![version](https://img.shields.io/badge/version-0.12.2-0f6e56)](./package.json)
 
 ---
 
