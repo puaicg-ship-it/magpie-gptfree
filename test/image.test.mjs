@@ -8,6 +8,7 @@ import {
   CODEX_BASE, discoverPoolModels, poolFetch, probeAccountImageQuota, refreshPoolAccount,
 } from "../lib/codex-pool.mjs";
 import { bridgeChatToImage } from "../lib/chat-image-bridge.mjs";
+import { accountInflight, clearAccountInflight } from "../lib/account-inflight.mjs";
 import { readImageReplyMode, writeImageReplyMode } from "../lib/reply-settings.mjs";
 import {
   IMAGE_MODEL_ID,
@@ -721,6 +722,159 @@ test("a slow first account no longer blocks the request: the hedge lane wins", a
     Date.now() - started < 600,
     "the request must return on the hedge result, not wait for the slow first account",
   );
+});
+
+// 单号并发闸：`tried` 只保证同一请求内两条 lane 不撞号，但四个并发请求各自的
+// 第一条 lane 完全可能挑中同一个号 —— 那个号就被四个 worker 同时打。
+// 排序里降权挡不住（四条 lane 各自排序，第一名照样是同一个），必须在这里硬跳过。
+test("two concurrent requests never hit the same account when the pool has alternatives", async () => {
+  clearAccountInflight();
+  const accounts = [1, 2].map((n) => ({
+    email: `c${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `c${n}@example.com`),
+  }));
+  const seen = [];
+  let releaseFirst;
+  const holdFirst = new Promise((resolve) => { releaseFirst = resolve; });
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+
+  const request = { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 };
+  const first = executeWebImageGeneration({
+    accounts,
+    request,
+    reauthenticate: async (a) => a,
+    maxTotalMs: 5_000,
+    // 不打算测对冲：把第二路推远，保证只有一个 lane 在领号。
+    hedgeDelayMs: 60_000,
+    perAccountInflight: 1,
+    runWorker: async (payload) => {
+      seen.push(payload.access_token);
+      markFirstStarted();
+      await holdFirst;
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  try {
+    await firstStarted;   // 第一个请求已经攥住 c1
+    const second = await executeWebImageGeneration({
+      accounts,
+      request,
+      reauthenticate: async (a) => a,
+      maxTotalMs: 5_000,
+      hedgeDelayMs: 60_000,
+      perAccountInflight: 1,
+      runWorker: async (payload) => {
+        seen.push(payload.access_token);
+        return { ok: true, data: [{ b64_json: "BBBB" }] };
+      },
+    });
+    assert.equal(second.data.length, 1);
+    assert.equal(seen.length, 2);
+    assert.notEqual(seen[0], seen[1], "第二个请求必须换一个号，不能压在被占用的号上");
+  } finally {
+    releaseFirst();
+    await first.catch(() => {});
+    clearAccountInflight();
+  }
+});
+
+// 反证：把闸关掉（0 = 不限制）同样的场景就会撞同一个号。
+// 没有这条，「上面那个用例通过」也可能只是碰巧。
+test("without the gate the same scenario collides on one account", async () => {
+  clearAccountInflight();
+  const accounts = [1, 2].map((n) => ({
+    email: `d${n}@example.com`, password: "p", totp: seed, accessToken: jwt(3600, `d${n}@example.com`),
+  }));
+  const seen = [];
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  const request = { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 };
+
+  const first = executeWebImageGeneration({
+    accounts, request, reauthenticate: async (a) => a,
+    maxTotalMs: 5_000, hedgeDelayMs: 60_000, perAccountInflight: 0,
+    runWorker: async (payload) => {
+      seen.push(payload.access_token);
+      started();
+      await hold;
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  try {
+    await started;
+    await executeWebImageGeneration({
+      accounts, request, reauthenticate: async (a) => a,
+      maxTotalMs: 5_000, hedgeDelayMs: 60_000, perAccountInflight: 0,
+      runWorker: async (payload) => {
+        seen.push(payload.access_token);
+        return { ok: true, data: [{ b64_json: "BBBB" }] };
+      },
+    });
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0], seen[1], "关掉闸之后两个请求都从队首开始，必然撞号");
+  } finally {
+    release();
+    await first.catch(() => {});
+    clearAccountInflight();
+  }
+});
+
+// 池子只有一个号时不能因为闸而直接不出图：宁可让这个号稍微超载。
+test("a single-account pool still serves concurrent requests instead of failing", async () => {
+  clearAccountInflight();
+  const accounts = [{
+    email: "only@example.com", password: "p", totp: seed, accessToken: jwt(3600, "only@example.com"),
+  }];
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  const request = { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 };
+
+  const first = executeWebImageGeneration({
+    accounts, request, reauthenticate: async (a) => a,
+    maxTotalMs: 5_000, hedgeDelayMs: 60_000, perAccountInflight: 1,
+    runWorker: async () => { started(); await hold; return { ok: true, data: [{ b64_json: "AAAA" }] }; },
+  });
+  try {
+    await started;
+    const second = await executeWebImageGeneration({
+      accounts, request, reauthenticate: async (a) => a,
+      maxTotalMs: 5_000, hedgeDelayMs: 60_000, perAccountInflight: 1,
+      runWorker: async () => ({ ok: true, data: [{ b64_json: "BBBB" }] }),
+    });
+    assert.equal(second.data.length, 1, "只有一个号时也得照常出图");
+  } finally {
+    release();
+    await first.catch(() => {});
+    clearAccountInflight();
+  }
+});
+
+// 计数必须在 finally 里减回来：一次异常不能把这个号永久钉在「满」上。
+test("a failed attempt releases the inflight slot", async () => {
+  clearAccountInflight();
+  const accounts = [{
+    email: "boom@example.com", password: "p", totp: seed, accessToken: jwt(3600, "boom@example.com"),
+  }];
+  await assert.rejects(
+    executeWebImageGeneration({
+      accounts,
+      request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+      reauthenticate: async (a) => a,
+      maxTotalMs: 2_000,
+      hedgeDelayMs: 60_000,
+      perAccountInflight: 1,
+      runWorker: async () => { throw new Error("worker exploded"); },
+    }),
+  );
+  assert.equal(accountInflight("boom@example.com"), 0, "失败之后这个号必须重新可用");
+  clearAccountInflight();
 });
 
 test("a client abort surfaces as AbortError, not a 503", async () => {

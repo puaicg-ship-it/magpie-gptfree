@@ -924,6 +924,9 @@
     for (const tier of ["S", "A", "B", "C"]) {
       $(`policyWeight${tier}`).value = weights[tier] === undefined ? "" : String(weights[tier]);
     }
+    $("policyInflight").value = String(
+      policy.perAccountImageInflight === undefined ? 1 : policy.perAccountImageInflight,
+    );
 
     host.replaceChildren();
     const observed = Array.isArray(policyState.observedFeatures) ? policyState.observedFeatures : [];
@@ -950,7 +953,7 @@
 
     // 环境变量压着的时候整块置灰：改了不生效比不让改更糟。
     const locked = policyState.source === "env";
-    for (const id of ["policyTierAuto", "policyEwma", "policyLatency", "policyHang", "policySave"]) {
+    for (const id of ["policyTierAuto", "policyEwma", "policyLatency", "policyHang", "policyInflight", "policySave"]) {
       const node = $(id);
       if (node) node.disabled = locked;
     }
@@ -981,6 +984,8 @@
       textQuotaFeatures: policyFeaturesChosen(),
       ...(Object.keys(tierWeights).length ? { tierWeights } : {}),
     };
+    const inflight = Number($("policyInflight").value);
+    if (Number.isFinite(inflight)) body.perAccountImageInflight = Math.max(0, Math.min(8, Math.round(inflight)));
     try {
       const result = await api("policy", body);
       policyState = { ...policyState, policy: result.policy };

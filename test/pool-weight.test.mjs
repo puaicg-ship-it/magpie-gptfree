@@ -207,6 +207,16 @@ test("poolMedianTtfb takes the median of the accounts that have samples", () => 
   assert.equal(poolMedianTtfb(null, null), null);
 });
 
+test("a saturated account is down-weighted but never zeroed out", () => {
+  const rec = { imageQuota: 20, successCalls: 10, consecutiveFails: 0 };
+  const base = weigh(rec);
+  assert.equal(weigh(rec, { inflightOf: () => 1, perAccountInflight: 1 }), base * 0.2);
+  assert.equal(weigh(rec, { inflightOf: () => 0, perAccountInflight: 1 }), base);
+  // 上限 0 / 不传 = 不限制，权重必须逐位回到原值
+  assert.equal(weigh(rec, { inflightOf: () => 9, perAccountInflight: 0 }), base);
+  assert.equal(weigh(rec, { inflightOf: () => 9 }), base);
+});
+
 test("batch recency still stacks on top of everything else", () => {
   const older = newBatchId(Date.UTC(2026, 0, 1));
   const newer = newBatchId(Date.UTC(2026, 10, 1));

@@ -361,6 +361,7 @@
             <label class="inline-check"><input type="checkbox" id="policyEwma"> <span>EWMA 成功率加权</span></label>
             <label class="inline-check"><input type="checkbox" id="policyLatency"> <span>首字节延迟加权</span></label>
             <label class="inline-check"><input type="checkbox" id="policyHang"> <span>连续卡死降权</span></label>
+            <label class="filter-field">单号并发 <input id="policyInflight" type="number" min="0" max="8" class="num-input" title="同一个号同时允许几个生图 worker。1 = 同一时刻只让一个请求打它；0 = 不限制"></label>
           </div>
           <div class="settings-row">
             <span class="filter-field">文本额度取哪个 feature

@@ -23,6 +23,7 @@ import {
 } from "../lib/pool-stats.mjs";
 import { accountSlotTag } from "../lib/pool-connection.mjs";
 import { newBatchId } from "../lib/batch-registry.mjs";
+import { DEFAULT_POOL_POLICY } from "../lib/pool-policy.mjs";
 
 const account = (email) => ({ email, password: "p", totp: "seed", accessToken: "t" });
 
@@ -91,6 +92,33 @@ test("the newest batch gets a modest edge when quotas are otherwise equal", () =
   const picks = pickCounts([a, b], stats, 47);
   assert(Math.abs(picks[b.email] - 25) <= 1, `新批次 ${picks[b.email]} 次`);
   assert(Math.abs(picks[a.email] - 22) <= 1, `旧批次 ${picks[a.email]} 次`);
+});
+
+// 单号并发闸的「软」那一半：在飞已满的号在排序里被压到 0.2 倍权重。
+// 硬的那一半（直接跳过）在 chatgpt-web-image 的 takeNext 里。
+test("an account that is already busy sinks in the ordering", () => {
+  const busy = account("busy@example.com");
+  const idle = account("idle@example.com");
+  const stats = statsWith({
+    [busy.email]: { imageQuota: 20, successCalls: 10, failCalls: 0 },
+    [idle.email]: { imageQuota: 20, successCalls: 10, failCalls: 0 },
+  });
+  // 额度相同，谁在飞谁靠后：45 次里空闲的那个应该拿到 25 次（1 : 0.2）。
+  const credit = new Map();
+  const picks = { [busy.email]: 0, [idle.email]: 0 };
+  for (let i = 0; i < 36; i++) {
+    const [first] = selectPoolOrder({
+      accounts: [busy, idle],
+      stats,
+      credit,
+      policy: { ...DEFAULT_POOL_POLICY, perAccountImageInflight: 1 },
+      // 这里直接注入计数，不依赖全局 Map 的状态
+      inflightOf: (a) => (a.email === busy.email ? 1 : 0),
+    });
+    picks[first.email] += 1;
+  }
+  assert(picks[idle.email] > picks[busy.email], `空闲 ${picks[idle.email]} vs 在飞 ${picks[busy.email]}`);
+  assert(picks[idle.email] + picks[busy.email] === 36);
 });
 
 test("batch recency never overrides a large quota gap", () => {
