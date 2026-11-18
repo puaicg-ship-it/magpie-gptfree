@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { upsertPool, listPool, removePool } from "../lib/pool-vault.mjs";
+import { LEGACY_BATCH_ID, newBatchId } from "../lib/batch-registry.mjs";
 import {
   verifyAccessToken, poolFetch, prepareCodexBody, CODEX_BASE,
   renewAccount, discoverPoolModels, refreshPoolAccount,
@@ -52,6 +53,46 @@ test("vault keeps sensitive fields encrypted, updates and removes records", asyn
     assert.equal((await listPool({ root }))[0].password, "second-secret");
     assert.equal((await removePool("a@example.com", { root })).removed, 1);
     assert.equal((await listPool({ root })).length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// 导入日期和批次是「首次入库即固定」的历史事实，不是当前状态：
+// 刷新授权、重新登录、重新导入同一个邮箱都不该改动它们，否则一次重新导入
+// 就能把权重悄悄挪走（批次新鲜度是权重因子之一）。
+test("vault stamps addedAt and batchId once and never rewrites them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "gptfree-batch-vault-"));
+  try {
+    const record = { email: "batch@example.com", password: "p", totp: seed, accessToken: jwt(3600) };
+    const first = newBatchId(Date.UTC(2026, 10, 18, 2, 0, 0));
+    const later = newBatchId(Date.UTC(2026, 10, 19, 2, 0, 0));
+
+    await upsertPool(record, { root, batchId: first });
+    let [row] = await listPool({ root });
+    assert.equal(row.batchId, first);
+    assert.ok(row.addedAt, "首次入库必须记下时间");
+    const addedAt = row.addedAt;
+
+    // 换密码 + 换 token（等价于刷新授权）再来一次，并且传一个更新的批次。
+    await upsertPool({ ...record, password: "p2", accessToken: jwt(7200) }, { root, batchId: later });
+    [row] = await listPool({ root });
+    assert.equal(row.password, "p2");
+    assert.equal(row.batchId, first, "重新导入不能把号挪到新批次");
+    assert.equal(row.addedAt, addedAt, "首次入库时间不能被覆盖");
+    assert.ok(row.updatedAt >= addedAt, "updatedAt 才是会变的那一个");
+
+    // 不带 batchId 的新账号归到历史批次，而不是留空。
+    await upsertPool({ email: "legacy@example.com", password: "p", totp: seed, accessToken: jwt(3600) }, { root });
+    const legacy = (await listPool({ root })).find((r) => r.email === "legacy@example.com");
+    assert.equal(legacy.batchId, LEGACY_BATCH_ID);
+    assert.ok(legacy.addedAt);
+
+    // 非法 batchId 不接受，静默退回历史批次。
+    await upsertPool(
+      { email: "junk@example.com", password: "p", totp: seed, accessToken: jwt(3600) },
+      { root, batchId: "not-a-batch" },
+    );
+    const junk = (await listPool({ root })).find((r) => r.email === "junk@example.com");
+    assert.equal(junk.batchId, LEGACY_BATCH_ID);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

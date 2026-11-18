@@ -481,6 +481,8 @@ footer { text-align: center; margin-top: 18px; color: var(--muted); font-size: 1
 .live-track { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--bg-soft); overflow: hidden }
 .live-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width .3s ease }
 .live-fill.warn { background: var(--bad) }
+/* 单张卡铺满一行（导入批次）：批次标签比账号名长，两列挤不下。 */
+.insights.single { grid-template-columns: minmax(0, 1fr) }
 /* 实时请求表：6 列，比账号表窄，不跟着 960px 走。 */
 .live-wrap { max-height: 460px }
 .live-table { min-width: 620px }

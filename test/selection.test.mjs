@@ -21,6 +21,7 @@ import {
   summarizePoolStats,
 } from "../lib/pool-stats.mjs";
 import { accountSlotTag } from "../lib/pool-connection.mjs";
+import { newBatchId } from "../lib/batch-registry.mjs";
 
 const account = (email) => ({ email, password: "p", totp: "seed", accessToken: "t" });
 
@@ -57,6 +58,110 @@ test("weighted rotation hands out requests in proportion to remaining quota", ()
   // 权重 3:1 → 30:10，允许一格误差
   assert(Math.abs(picks[a.email] - 30) <= 1, `A picked ${picks[a.email]}`);
   assert(Math.abs(picks[b.email] - 10) <= 1, `B picked ${picks[b.email]}`);
+});
+
+// ---------- 批次新鲜度权重（0.10.1） ----------
+
+const batchOf = (ms) => newBatchId(ms);
+
+function pickCounts(accounts, stats, rounds) {
+  // 每次用一份新的轮转账本，避免和别的用例共用模块级 credit。
+  const credit = new Map();
+  const picks = Object.fromEntries(accounts.map((a) => [a.email, 0]));
+  for (let i = 0; i < rounds; i++) {
+    const [first] = selectPoolOrder({ accounts, stats, credit });
+    picks[first.email] += 1;
+  }
+  return picks;
+}
+
+test("the newest batch gets a modest edge when quotas are otherwise equal", () => {
+  const oldBatch = batchOf(Date.UTC(2026, 0, 1));
+  const newBatch = batchOf(Date.UTC(2026, 10, 18));
+  const a = { ...account("old-batch@example.com"), batchId: oldBatch };
+  const b = { ...account("new-batch@example.com"), batchId: newBatch };
+  const stats = statsWith({
+    [a.email]: { imageQuota: 20, successCalls: 10, failCalls: 0 },
+    [b.email]: { imageQuota: 20, successCalls: 10, failCalls: 0 },
+  });
+
+  // 两个批次时是 1.25 : 1.10（不是 1.25 : 1.0 —— 第 2 新的批次也有加成）。
+  // 合计 47 次里应该 25:22。
+  const picks = pickCounts([a, b], stats, 47);
+  assert(Math.abs(picks[b.email] - 25) <= 1, `新批次 ${picks[b.email]} 次`);
+  assert(Math.abs(picks[a.email] - 22) <= 1, `旧批次 ${picks[a.email]} 次`);
+});
+
+test("batch recency never overrides a large quota gap", () => {
+  const oldBatch = batchOf(Date.UTC(2026, 0, 1));
+  const newBatch = batchOf(Date.UTC(2026, 10, 18));
+  // 老批次额度 40，新批次只剩 2：1.25 倍不足以把请求送进快空的号。
+  const a = { ...account("rich-old@example.com"), batchId: oldBatch };
+  const b = { ...account("empty-new@example.com"), batchId: newBatch };
+  const stats = statsWith({
+    [a.email]: { imageQuota: 40, successCalls: 10, failCalls: 0 },
+    [b.email]: { imageQuota: 2, successCalls: 10, failCalls: 0 },
+  });
+  const picks = pickCounts([a, b], stats, 50);
+  assert(picks[a.email] > picks[b.email] * 5, `额度仍然是主导：${picks[a.email]} vs ${picks[b.email]}`);
+});
+
+// 等价性：只有一个批次（老池子全是 legacy）时，加成必须完全不生效 ——
+// 否则「升级后行为不变」这句话就不成立。
+test("a single batch is a strict no-op for the rotation", () => {
+  const only = batchOf(Date.UTC(2026, 10, 18));
+  const stats = statsWith({
+    "x-eq@example.com": { imageQuota: 20, successCalls: 4, failCalls: 0 },
+    "y-eq@example.com": { imageQuota: 10, successCalls: 4, failCalls: 0 },
+  });
+  const withBatch = [
+    { ...account("x-eq@example.com"), batchId: only },
+    { ...account("y-eq@example.com"), batchId: only },
+  ];
+  const withoutBatch = [account("x-eq@example.com"), account("y-eq@example.com")];
+
+  const run = (accounts) => {
+    const credit = new Map();
+    return Array.from({ length: 30 }, () => selectPoolOrder({ accounts, stats, credit })[0].email);
+  };
+  assert.deepEqual(run(withBatch), run(withoutBatch), "单批次时顺序必须逐位相同");
+});
+
+test("MAGPIE_GPTFREE_BATCH_RECENCY=0 turns the bonus off", () => {
+  const previous = process.env.MAGPIE_GPTFREE_BATCH_RECENCY;
+  process.env.MAGPIE_GPTFREE_BATCH_RECENCY = "0";
+  try {
+    const oldBatch = batchOf(Date.UTC(2026, 0, 1));
+    const newBatch = batchOf(Date.UTC(2026, 10, 18));
+    const a = { ...account("off-old@example.com"), batchId: oldBatch };
+    const b = { ...account("off-new@example.com"), batchId: newBatch };
+    const stats = statsWith({
+      [a.email]: { imageQuota: 20, successCalls: 10, failCalls: 0 },
+      [b.email]: { imageQuota: 20, successCalls: 10, failCalls: 0 },
+    });
+    const picks = pickCounts([a, b], stats, 40);
+    assert.equal(picks[a.email], 20, "关掉之后必须回到 50:50");
+    assert.equal(picks[b.email], 20);
+  } finally {
+    if (previous === undefined) delete process.env.MAGPIE_GPTFREE_BATCH_RECENCY;
+    else process.env.MAGPIE_GPTFREE_BATCH_RECENCY = previous;
+  }
+});
+
+test("bonus stops at the third newest batch instead of decaying forever", () => {
+  // 月份递增 = 批次越来越新，所以 accounts[3] 是最新、accounts[0] 是最旧。
+  const batches = [0, 1, 2, 3].map((i) => batchOf(Date.UTC(2026, i, 1)));
+  const accounts = batches.map((id, i) => ({ ...account(`b${i}-rank@example.com`), batchId: id }));
+  const stats = statsWith(Object.fromEntries(
+    accounts.map((a) => [a.email, { imageQuota: 20, successCalls: 10, failCalls: 0 }]),
+  ));
+  // 权重 25:22:21:20（第 4 新的批次没有加成），合计 88 次。
+  const picks = pickCounts(accounts, stats, 88);
+  const newest = picks[accounts[3].email];
+  const oldest = picks[accounts[0].email];
+  assert(Math.abs(newest - 25) <= 1, `最新批次 ${newest} 次`);
+  assert(Math.abs(oldest - 20) <= 1, `最老批次 ${oldest} 次`);
+  assert(newest > oldest);
 });
 
 test("exhausted and cooling accounts are pushed behind every usable account", () => {

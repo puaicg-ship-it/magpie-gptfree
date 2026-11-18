@@ -1,6 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { runBatch } from "../lib/importer.mjs";
+import { readBatches } from "../lib/batch-registry.mjs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { normalizeWorkerResult, loginHTTPAccount } from "../lib/dsh-http-auth.mjs";
 import { GPTFreePoolPlugin } from "../index.mjs";
 
@@ -92,6 +96,70 @@ test("skipInvalid imports valid multi-account batch with proxy and reports inval
   assert.equal(result.invalid[0].line, 1);
   assert.deepEqual(seenProxies, ["http://127.0.0.1:7890", "http://127.0.0.1:7890"]);
   assert.deepEqual(stored, ["good1@example.com", "good2@example.com"]);
+});
+
+// 一次导入 = 一个批次：同一批里所有号必须共用一个 batchId，
+// 否则「批次权重」会退化成「每个号一个批次」，等于没有批次。
+test("one import run stamps every saved account with the same batch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-import-batch-"));
+  const batchFile = join(dir, "batches.json");
+  try {
+    const content = [
+      `a@example.com----p1----${seed}`,
+      `b@example.com----p2----${seed}`,
+      `c@example.com----p3----${seed}`,
+    ].join("\n");
+    const saved = [];
+    const result = await runBatch({
+      file: "virtual.txt", read: async () => content, consent: true,
+      login: async () => ({ tokens: { access: "fresh", refresh: "r", id: "i" } }),
+      verifyToken: async (token) => ({ accepted: token === "fresh" }),
+      savePool: async (record, opts) => { saved.push({ email: record.email, batchId: opts?.batchId }); },
+      checkQuota: null,
+      batchFile,
+      source: "gui",
+    });
+
+    assert.equal(result.added, 3);
+    assert.equal(saved.length, 3);
+    const ids = new Set(saved.map((item) => item.batchId));
+    assert.equal(ids.size, 1, "整批只能有一个批次号");
+    const batchId = [...ids][0];
+    assert.equal(result.batchId, batchId);
+    assert.ok(batchId.startsWith("b"));
+
+    const stored = await readBatches({ file: batchFile });
+    assert.equal(stored.batches.length, 1);
+    assert.equal(stored.batches[0].id, batchId);
+    assert.equal(stored.batches[0].count, 3);
+    assert.equal(stored.batches[0].source, "gui");
+    assert.ok(stored.batches[0].importedAt);
+    assert.match(stored.batches[0].label, /· 3 个$/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// 一个号都没进池（全失败）时不该留下空批次 —— 面板里只会制造噪音。
+test("a run that adds nothing records no batch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-import-batch-empty-"));
+  const batchFile = join(dir, "batches.json");
+  try {
+    const result = await runBatch({
+      file: "virtual.txt", consent: true,
+      read: async () => `a@example.com----p1----${seed}`,
+      login: async () => { throw new Error("HTTP 登录失败"); },
+      verifyToken: async () => ({ accepted: false }),
+      savePool: async () => {},
+      checkQuota: null,
+      batchFile,
+    });
+    assert.equal(result.added, 0);
+    assert.equal(result.batchId, null);
+    assert.deepEqual((await readBatches({ file: batchFile })).batches, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("one failed HTTP account does not discard the next one or leak exceptions", async () => {

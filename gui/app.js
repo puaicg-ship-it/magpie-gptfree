@@ -1179,6 +1179,13 @@
     const name = el("span", "acct-name", account.slotLabel || account.email);
     name.title = account.slotTag || account.email || "";
     nameTd.append(name);
+    // 导入日期 / 批次：不影响状态，但排查「为什么这批号都在失败」时是第一条线索。
+    const batchNote = batchNoteText(account);
+    if (batchNote.text) {
+      const note = el("span", "cell-sub", batchNote.text);
+      if (batchNote.title) note.title = batchNote.title;
+      nameTd.append(note);
+    }
     tr.append(nameTd);
 
     const planTd = el("td");
@@ -2034,6 +2041,41 @@
   }
 
   /** 槽位号 → 遮罩邮箱。日志里只存了 `s<10hex>`，得靠当前账号表翻成人话。 */
+  /**
+   * 批次号 → 展示信息。`/api/stats` 只下发一次批次表，这里建个索引。
+   * ordinal 按**入库先后**数（最老的是第 1 批），和「第几新」的权重排名是反的 ——
+   * 面板上写「第 1 批」应该指最早那批，不然读起来别扭。
+   */
+  function batchMetaMap() {
+    const list = Array.isArray(snapshot?.batches) ? snapshot.batches : [];
+    const map = new Map();
+    list.forEach((batch, index) => {
+      map.set(batch.id, {
+        label: batch.label || batch.id,
+        importedAt: batch.importedAt || null,
+        count: Number(batch.count) || 0,
+        ordinal: list.length - index,
+        legacy: batch.id === "b00000000000000",
+      });
+    });
+    return map;
+  }
+  // 账号行副标题：能看出「哪天进来的」就够了，批次全名放 tooltip。
+  function batchNoteText(account) {
+    const meta = batchMetaMap().get(account?.batchId);
+    if (!account?.addedAt) {
+      return { text: "入库时间未知", title: (meta?.label || "历史批次") + " · 0.10.x 之前导入，没有记录时间" };
+    }
+    const d = new Date(account.addedAt);
+    if (Number.isNaN(d.getTime())) return { text: "", title: "" };
+    const pad = (n) => String(n).padStart(2, "0");
+    const date = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const title = meta
+      ? `${meta.label} · 第 ${meta.ordinal} 批 · ${d.toLocaleString()} 入库`
+      : `${d.toLocaleString()} 入库`;
+    return { text: `${date} 入库`, title };
+  }
+
   function slotLabelMap() {
     const map = new Map();
     for (const account of accountsOf()) {
@@ -2558,6 +2600,37 @@
     }
   }
 
+  function renderLiveBatches(data) {
+    const host = $("liveBatches");
+    host.replaceChildren();
+    const rows = Array.isArray(data?.batches) ? data.batches : [];
+    $("liveBatchInfo").textContent = rows.length
+      ? `${rows.length} 个批次 · 最新批次权重 ×1.25`
+      : "";
+    if (!rows.length) {
+      host.append(el("div", "insight-empty", "还没有导入批次信息。"));
+      return;
+    }
+    const maxQuota = Math.max(...rows.map((row) => Number(row.quota) || 0), 1);
+    for (const row of rows) {
+      const rate = typeof row.successRate === "number"
+        ? Math.round(row.successRate * 100) + "%"
+        : "—";
+      host.append(liveBarRow({
+        label: row.label,
+        title: `导入 ${row.importedAt ? new Date(row.importedAt).toLocaleString() : "时间未知"}` +
+          ` · 来源 ${row.source || "未知"} · ${row.id}`,
+        value: `${row.accounts} 个`,
+        note: `${rate} 成功`,
+        noteTitle: `成功 ${row.success} · 失败 ${row.fail} · 可用 ${row.usable}` +
+          ` · 限流 ${row.limited} · 失效 ${row.dead} · 剩余额度 ${row.quota}`,
+        ratio: (Number(row.quota) || 0) / maxQuota,
+        // 成功率低于一半的批次标红：这就是「该不该继续给它权重」的判断信号。
+        warn: typeof row.successRate === "number" && row.successRate < 0.5,
+      }));
+    }
+  }
+
   function renderLiveRows() {
     const body = $("liveRows");
     if (!body) return;
@@ -2647,6 +2720,7 @@
     renderLiveCards(payload);
     renderLiveForecast(payload);
     renderLiveActivity(payload);
+    renderLiveBatches(payload);
     const recent = payload?.recent || {};
     liveState.rows = Array.isArray(recent.items) ? recent.items.slice() : [];
     liveState.seq = Number(recent.seq) || 0;
@@ -2677,6 +2751,7 @@
     if (!liveState.payload) return;
     renderLiveForecast(liveState.payload);
     renderLiveActivity(liveState.payload);
+    renderLiveBatches(liveState.payload);
     renderLiveRows();
   }
 

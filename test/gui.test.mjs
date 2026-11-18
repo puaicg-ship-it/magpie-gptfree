@@ -5,6 +5,7 @@ import { createInMemoryStatsStore, recordImageCall, recordQuotaCheck } from "../
 import { IMAGE_ERROR_LOG_MAX_LIMIT, appendImageErrorLog } from "../lib/image-error-log.mjs";
 import { accountSlotTag, formatAccountSlotLabel } from "../lib/pool-connection.mjs";
 import { clearRequestLog, recordRequest } from "../lib/request-log.mjs";
+import { newBatchId, recordBatch } from "../lib/batch-registry.mjs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
@@ -990,6 +991,174 @@ test("the live dashboard exposes capacity, forecast and the request ring without
     assert.equal((await h.api("requests?limit=10")).json.items.length, 0);
   } finally {
     clearRequestLog();
+    await h.close();
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- 导入批次（0.10.1） ----------
+
+test("batch metadata reaches the panel, and rows carry the import date", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-batch-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  const email = "batch-gui@example.com";
+  const batchId = newBatchId(Date.UTC(2026, 10, 18, 2, 54, 0));
+  await recordBatch(
+    { id: batchId, label: "11月采购批", importedAt: "2026-11-18T02:54:00.000Z", count: 1, source: "gui" },
+    { file: join(dir, "batches.json") },
+  );
+
+  const h = await harness({
+    poolRead: async () => [{
+      email, accessToken: future(), totp: seed, password: "p",
+      batchId, addedAt: "2026-11-18T02:54:00.000Z",
+    }],
+    statsStore: createInMemoryStatsStore(),
+  });
+  try {
+    // 静态：批次区块在页面里，前端有对应的渲染入口。
+    assert(h.html.includes('id="liveBatches"'), "运行页要有导入批次区块");
+    assert(h.html.includes('id="liveBatchInfo"'));
+    const appJs = await (await fetch(h.base + "assets/app.js")).text();
+    assert(appJs.includes("renderLiveBatches"));
+    assert(appJs.includes("batchNoteText"));
+
+    const stats = await h.api("stats");
+    assert.equal(stats.status, 200);
+    assert.equal(stats.json.batches.length, 1);
+    assert.equal(stats.json.batches[0].id, batchId);
+    assert.equal(stats.json.batches[0].label, "11月采购批");
+
+    const row = stats.json.accounts[0];
+    assert.equal(row.batchId, batchId);
+    assert.equal(row.addedAt, "2026-11-18T02:54:00.000Z");
+
+    // 运行面板的批次聚合：一个号、成功率还没数据（null 而不是 0）。
+    const dash = await h.api("dashboard");
+    assert.equal(dash.json.batches.length, 1);
+    assert.equal(dash.json.batches[0].accounts, 1);
+    assert.equal(dash.json.batches[0].label, "11月采购批");
+    assert.equal(dash.json.batches[0].successRate, null);
+
+    // 批次元数据里不能夹带邮箱。
+    assert.doesNotMatch(JSON.stringify(stats.json), /batch-gui@example\.com/);
+    assert.doesNotMatch(JSON.stringify(dash.json), /batch-gui@example\.com/);
+  } finally {
+    await h.close();
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an account without batch info falls back to the legacy batch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-legacy-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  const h = await harness({
+    // 老记录：账号库里没有 batchId / addedAt。
+    poolRead: async () => [
+      { email: "legacy-gui@example.com", accessToken: future(), totp: seed, password: "p" },
+    ],
+    statsStore: createInMemoryStatsStore(),
+  });
+  try {
+    const stats = await h.api("stats");
+    const row = stats.json.accounts[0];
+    assert.equal(row.batchId, "b00000000000000", "没有批次信息就归历史批次");
+    assert.equal(row.addedAt, null, "不能拿 updatedAt 冒充导入时间");
+    assert.equal(stats.json.batches[0].id, "b00000000000000");
+    assert.equal(stats.json.batches[0].importedAt, null);
+  } finally {
+    await h.close();
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------- 导入批次（0.10.1） ----------
+
+test("batch metadata reaches the panel, and rows carry the import date", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-batch-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  const email = "batch-gui@example.com";
+  const batchId = newBatchId(Date.UTC(2026, 10, 18, 2, 54, 0));
+  await recordBatch(
+    { id: batchId, label: "11月采购批", importedAt: "2026-11-18T02:54:00.000Z", count: 1, source: "gui" },
+    { file: join(dir, "batches.json") },
+  );
+
+  const h = await harness({
+    poolRead: async () => [{
+      email, accessToken: future(), totp: seed, password: "p",
+      batchId, addedAt: "2026-11-18T02:54:00.000Z",
+    }],
+    statsStore: createInMemoryStatsStore(),
+  });
+  try {
+    // 静态：批次区块在页面里，前端有对应的渲染入口。
+    assert(h.html.includes('id="liveBatches"'), "运行页要有导入批次区块");
+    assert(h.html.includes('id="liveBatchInfo"'));
+    const appJs = await (await fetch(h.base + "assets/app.js")).text();
+    assert(appJs.includes("renderLiveBatches"));
+    assert(appJs.includes("batchNoteText"));
+
+    const stats = await h.api("stats");
+    assert.equal(stats.status, 200);
+    assert.equal(stats.json.batches.length, 1);
+    assert.equal(stats.json.batches[0].id, batchId);
+    assert.equal(stats.json.batches[0].label, "11月采购批");
+
+    const row = stats.json.accounts[0];
+    assert.equal(row.batchId, batchId);
+    assert.equal(row.addedAt, "2026-11-18T02:54:00.000Z");
+
+    // 运行面板的批次聚合：一个号、成功率还没数据（null 而不是 0）。
+    const dash = await h.api("dashboard");
+    assert.equal(dash.json.batches.length, 1);
+    assert.equal(dash.json.batches[0].accounts, 1);
+    assert.equal(dash.json.batches[0].label, "11月采购批");
+    assert.equal(dash.json.batches[0].successRate, null);
+
+    // 批次元数据里不能夹带邮箱。
+    assert.doesNotMatch(JSON.stringify(stats.json), /batch-gui@example\.com/);
+    assert.doesNotMatch(JSON.stringify(dash.json), /batch-gui@example\.com/);
+  } finally {
+    await h.close();
+    if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an account without batch info falls back to the legacy batch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-gui-legacy-"));
+  const previousHome = process.env.MAGPIE_GPTFREE_HOME;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+
+  const h = await harness({
+    // 老记录：账号库里没有 batchId / addedAt。
+    poolRead: async () => [
+      { email: "legacy-gui@example.com", accessToken: future(), totp: seed, password: "p" },
+    ],
+    statsStore: createInMemoryStatsStore(),
+  });
+  try {
+    const stats = await h.api("stats");
+    const row = stats.json.accounts[0];
+    assert.equal(row.batchId, "b00000000000000", "没有批次信息就归历史批次");
+    assert.equal(row.addedAt, null, "不能拿 updatedAt 冒充导入时间");
+    assert.equal(stats.json.batches[0].id, "b00000000000000");
+    assert.equal(stats.json.batches[0].importedAt, null);
+  } finally {
     await h.close();
     if (previousHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
     else process.env.MAGPIE_GPTFREE_HOME = previousHome;
