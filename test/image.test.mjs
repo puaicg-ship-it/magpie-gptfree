@@ -1412,3 +1412,112 @@ test("an account that never sends an upstream byte is dropped at the hang thresh
   assert.equal(result.data.length, 1);
   assert(Date.now() - started < 2_000, "the hang must not cost the full attempt timeout");
 });
+
+test("bridge: 会话标题任务本地作答，不碰号池（含三条反证）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-title-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+  delete process.env.MAGPIE_GPTFREE_BRIDGE_TITLE_FASTPATH;
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    let calls = 0;
+    const forward = async () => {
+      calls++;
+      return new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    };
+    // 线上真实形状：2KB 以内的 system，要一个 {"isNewTopic","title"} 的 JSON。
+    const titleSystem = "Generate a concise, sentence-case title (3-7 words) that captures the main "
+      + "topic or goal of this session. Respond with EXACTLY one JSON object and nothing else: "
+      + "{\"isNewTopic\": boolean, \"title\": string}";
+    const agentSystem = "This conversation is powered by gpt-image-2\n\n" + "x".repeat(40_000);
+
+    // 1) 标题任务：上游一次都不能打
+    const plain = await bridgeChatToImage(JSON.stringify({
+      model: "gpt-image-2",
+      messages: [
+        { role: "system", content: titleSystem },
+        { role: "user", content: "<session>\nfix login button on mobile\n</session>" },
+      ],
+    }), {}, { forward });
+    assert.equal(calls, 0, "标题任务不许碰号池：碰一次就是一张白烧的图");
+    const title = JSON.parse((await plain.json()).choices[0].message.content);
+    assert.deepEqual(title, { isNewTopic: true, title: "Fix login button on mobile" });
+
+    // 中文按字截，且不能把 <session> 标签带进标题
+    const cjk = await bridgeChatToImage(JSON.stringify({
+      model: "gpt-image-2",
+      messages: [
+        { role: "system", content: titleSystem },
+        { role: "user", content: "<session>\n在夏夜，有淡蓝色的星空，海边，流星，烟花，海滩上全是蓝玫瑰和绿色植物\n</session>" },
+      ],
+    }), {}, { forward });
+    const cjkTitle = JSON.parse((await cjk.json()).choices[0].message.content).title;
+    assert.equal(calls, 0);
+    assert(!cjkTitle.includes("<session>"));
+    assert(cjkTitle.startsWith("在夏夜"));
+    assert(cjkTitle.length <= 18, "中文标题按字截，别给半句话");
+
+    // 流式也是同一个 JSON，一帧发完
+    const streamed = await bridgeChatToImage(JSON.stringify({
+      model: "gpt-image-2", stream: true,
+      messages: [
+        { role: "system", content: titleSystem },
+        { role: "user", content: "<session>\nfix login button on mobile\n</session>" },
+      ],
+    }), {}, { forward });
+    assert.match(streamed.headers.get("content-type"), /text\/event-stream/);
+    const deltas = (await streamed.text()).split("\n\n")
+      .filter((chunk) => chunk.startsWith("data: ") && !chunk.includes("[DONE]"))
+      .map((chunk) => JSON.parse(chunk.slice(6)).choices[0].delta.content)
+      .filter((text) => typeof text === "string");
+    assert.equal(deltas.length, 1);
+    assert.equal(calls, 0);
+    assert.deepEqual(JSON.parse(deltas[0]), { isNewTopic: true, title: "Fix login button on mobile" });
+
+    // 反证 A：system 短、但不像标题任务 → 照常生图（否则就是把真画图也拦了）
+    await bridgeChatToImage(JSON.stringify({
+      model: "gpt-image-2",
+      messages: [
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: "a red apple" },
+      ],
+    }), {}, { forward });
+    assert.equal(calls, 1, "短 system 不等于标题任务");
+
+    // 反证 B：agent 主回合（43KB system + tools）→ 照常生图
+    await bridgeChatToImage(JSON.stringify({
+      model: "gpt-image-2",
+      tools: [{ type: "function", function: { name: "Read" } }],
+      messages: [
+        { role: "system", content: agentSystem },
+        { role: "user", content: "a red apple" },
+      ],
+    }), {}, { forward });
+    assert.equal(calls, 2, "带 tools 的 agent 回合必须照常生图");
+
+    // 反证 C：带图（改图）就算 system 像标题任务，也不能跳过
+    await bridgeChatToImage(JSON.stringify({
+      model: "gpt-image-2",
+      messages: [
+        { role: "system", content: titleSystem },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "把背景换成蓝色" },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${png}` } },
+          ],
+        },
+      ],
+    }), {}, { forward });
+    assert.equal(calls, 3, "带图的请求是改图，不能走标题快路");
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -4,6 +4,52 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.12.3] - 2026-11-18
+
+**「出图成功了，客户端还在等」：其实是两个不同的请求，其中一个是会话标题。**
+
+### 症状
+
+14:34 之后，面板上能看见一次成功的出图，但客户端一直转圈；同时号池在不停地
+换新号生图，六分钟后客户端放弃。当天落盘 30 张图，客户端真正来取 `/img/` 的
+只有 11 张。
+
+### 根因：模型判不了「这次调用想干什么」
+
+网关的调用记录（`/config/magpie/gateway-conversations/<日期>/*/turns.jsonl`）
+显示，同一个会话里有两类请求，**模型字段都是 `gpt-image2.6`**：
+
+- **会话标题请求**：system 2KB（"Generate a concise, sentence-case title…"，
+  要一个 `{"isNewTopic","title"}` 的 JSON），user 是一条 `<session>…</session>`；
+- **agent 主回合**：system 38–43KB + tools 17–26KB。
+
+桥只看 `isImageModelId(model)`，于是把标题请求也当成画图：真去生图、花掉一个
+账号额度、返回 `![image](…)`，而客户端要的是 JSON —— 那张图没有任何客户端会
+来取。同时真正的 agent 回合在另一条 requestId 上换号换到超时，所以「图成功了」
+和「客户端还在等」同时成立。
+
+### 改法
+
+桥新增一条**标题快路**：三条同时成立才走（宁可漏判，不误判）——
+
+1. 请求里没有 `tools` / `functions`（agent 回合一定带）；
+2. 首条 system 存在且短于 4KB（agent 回合是 38KB 起）；
+3. system 里同时出现 `title` 和 `isNewTopic` / `sentence-case` / `JSON object`。
+
+命中就**不碰号池**，本地凑一个 3–7 个词的标题直接回 JSON（中文按字截 18 字，
+西文按词截 6 个词），流式/非流式都支持。带图的请求直接排除（那是改图）。
+
+`MAGPIE_GPTFREE_BRIDGE_TITLE_FASTPATH=0` 可关掉这条快路。
+
+### 没修的（留档）
+
+- 复杂 prompt 的 60 秒单账号预算仍可能不够（今天成功样本 17–42 秒，失败的
+  清一色卡满 60 秒）。
+- 网关会把插件返回的 SSE body 整体缓冲：直连 `127.0.0.1:3425` 实测，43 秒的
+  出图里只收到网关自己的 `: keepalive`，我们的 role 帧 / keepalive / content
+  全部在结束那一刻一次性到达。0.12.2 的 keepalive 只在插件内部有效，穿过网关
+  就失效 —— 这是「客户端等不到就重发」的放大器，改不了（在 magpie 那边）。
+
 ## [0.12.2] - 2026-11-18
 
 **一次出图链路上的三个真问题：慢号拖死整单、一张图烧两份额度、客户端干等 26 秒。**
