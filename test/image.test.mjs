@@ -1521,3 +1521,56 @@ test("bridge: 会话标题任务本地作答，不碰号池（含三条反证）
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("bridge: 只把 <user_query> 里的用户原话当画面描述（含 error-recovery 自锁）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "gptfree-bridge-envelope-"));
+  process.env.MAGPIE_GPTFREE_IMAGE_DIR = dir;
+  process.env.MAGPIE_GPTFREE_HOME = dir;
+  process.env.MAGPIE_GPTFREE_PUBLIC_BASE = "https://rk.example.test";
+  delete process.env.MAGPIE_GPTFREE_IMAGE_REPLY;
+  try {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").toString("base64");
+    const sent = [];
+    const forward = async (_endpoint, body) => {
+      sent.push(JSON.parse(body).prompt);
+      return new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+        status: 200, headers: { "content-type": "application/json" },
+      });
+    };
+    const ask = async (content) => {
+      await bridgeChatToImage(JSON.stringify({
+        model: "gpt-image-2", messages: [{ role: "user", content }],
+      }), {}, { forward });
+      return sent[sent.length - 1];
+    };
+
+    // 1) 正常信封：只发 <user_query> 里那句
+    const envelope = '<system-reminder data-role="user-context">\n<user_info>\nOS Version: win32\n'
+      + 'Workspace Folder: C:/Users/kodi/WorkBuddy AI/x\n</user_info>\n</system-reminder>\n\n'
+      + "<user_query>\ntwo leafy branches, pure white background, 8k\n</user_query>";
+    assert.equal(await ask(envelope), "two leafy branches, pure white background, 8k");
+
+    // 2) 线上真实的自锁形态：error-recovery 追加在 </user_query> 之后，必须被丢掉
+    const poisoned = envelope
+      + '\n<system-reminder data-role="error-recovery">Network error occurred, please continue</system-reminder>'
+      + '\n<system-reminder data-role="error-recovery">First token timeout occurred. Please continue where you left off.</system-reminder>'
+      + '\n<system-reminder data-role="error-recovery">Network error occurred, please continue</system-reminder>';
+    const cleaned = await ask(poisoned);
+    assert.equal(cleaned, "two leafy branches, pure white background, 8k");
+    assert(!cleaned.includes("please continue"), "「请继续」不能进画面描述");
+
+    // 3) 没有 <user_query>：剥掉 system-reminder 块
+    const noTag = '<system-reminder data-role="user-context">OS Version: darwin</system-reminder>'
+      + '\n<system-reminder data-role="error-recovery">Network error occurred, please continue</system-reminder>'
+      + "\na red apple on a table";
+    assert.equal(await ask(noTag), "a red apple on a table");
+
+    // 4) 反证：普通 prompt 一个字都不能动（否则就是把所有人的描述都改了）
+    assert.equal(await ask("a red apple on a table"), "a red apple on a table");
+  } finally {
+    delete process.env.MAGPIE_GPTFREE_IMAGE_DIR;
+    delete process.env.MAGPIE_GPTFREE_HOME;
+    delete process.env.MAGPIE_GPTFREE_PUBLIC_BASE;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
