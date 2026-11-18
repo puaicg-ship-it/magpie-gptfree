@@ -1004,6 +1004,69 @@ test("an aborted lane is recorded as attempt_aborted instead of vanishing", asyn
   assert.ok(results.some((r) => r.success === true), "另一路应该正常出图");
 });
 
+// 出图要 20–35 秒，在此之前一个字节都不发的话，客户端会当成死连接放弃 ——
+// 实测它在 26 秒左右就放弃了：既没渲染图片、也没来取图，但我们的响应其实发完了。
+test("a streaming request answers immediately with keepalives, then the content", async () => {
+  const previous = process.env.MAGPIE_GPTFREE_SSE_KEEPALIVE_MS;
+  process.env.MAGPIE_GPTFREE_SSE_KEEPALIVE_MS = "20";
+  const png = "iVBORw0KGgo=";
+  try {
+    const started = Date.now();
+    const response = await bridgeChatToImage(
+      JSON.stringify({ model: "gpt-image-2", stream: true, messages: [{ role: "user", content: "a cat" }] }),
+      {},
+      {
+        forward: async () => {
+          await new Promise((r) => setTimeout(r, 200));
+          return new Response(JSON.stringify({ created: 1, data: [{ b64_json: png }] }), {
+            status: 200, headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type"), /text\/event-stream/);
+    assert(Date.now() - started < 150, `响应头必须立刻返回，实际 ${Date.now() - started}ms`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const first = decoder.decode((await reader.read()).value);
+    assert.match(first, /^: keepalive/, "第一帧就要是 keepalive，不能等图出来");
+
+    let rest = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += decoder.decode(value);
+    }
+    assert.match(rest, /: keepalive/, "生成期间要持续发 keepalive");
+    assert.match(rest, /!\[image\]/);
+    assert.match(rest, /data: \[DONE\]/);
+  } finally {
+    if (previous === undefined) delete process.env.MAGPIE_GPTFREE_SSE_KEEPALIVE_MS;
+    else process.env.MAGPIE_GPTFREE_SSE_KEEPALIVE_MS = previous;
+  }
+});
+
+// 流式响应一旦发出去就改不了状态码，失败只能按 OpenAI 的惯例放进流里。
+// 附带好处：网关不会再把一次 150 秒的失败重试一遍（那是 2 分 32 秒的来源）。
+test("a streaming failure comes back as an error frame, not a 5xx", async () => {
+  const response = await bridgeChatToImage(
+    JSON.stringify({ model: "gpt-image-2", stream: true, messages: [{ role: "user", content: "x" }] }),
+    {},
+    {
+      forward: async () => new Response(JSON.stringify({ error: { message: "上游挂了" } }), {
+        status: 500, headers: { "content-type": "application/json" },
+      }),
+    },
+  );
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.match(text, /"error"/);
+  assert.match(text, /上游挂了/);
+  assert.match(text, /data: \[DONE\]/);
+});
+
 test("a client abort surfaces as AbortError, not a 503", async () => {
   const ctrl = new AbortController();
   const accounts = [{ email: "gone@example.com", password: "p", totp: seed, accessToken: jwt(3600, "gone@example.com") }];
