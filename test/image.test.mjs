@@ -877,6 +877,133 @@ test("a failed attempt releases the inflight slot", async () => {
   clearAccountInflight();
 });
 
+// 首字节来了但没在预算内出图 = worker_slow，不是卡死。这条区分很重要：
+// 混成一个码的话，慢模型会把池子里的好号一个个隔离掉。
+test("a worker that sends a first byte and then stalls is slow, not hung", async () => {
+  const accounts = [{
+    email: "slow@example.com", password: "p", totp: seed, accessToken: jwt(3600, "slow@example.com"),
+  }];
+  const results = [];
+  await assert.rejects(
+    executeWebImageGeneration({
+      accounts,
+      request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+      reauthenticate: async (a) => a,
+      maxTotalMs: 3_000,
+      attemptTimeoutMs: 300,
+      hangJudgeMs: 100,
+      hedgeDelayMs: 10_000,
+      onAccountResult: (e) => results.push(e),
+      runWorker: async (_payload, opts) => {
+        opts.onProgress("first_byte");
+        // 真实 worker 内建单次超时；这里按同样的口径模拟：到点回 worker_timeout。
+        return await new Promise((resolve) => {
+          const timer = setTimeout(() => resolve({
+            ok: false, http_status: 504, error_code: "worker_timeout",
+            error: "Image generation worker timed out",
+          }), opts.timeout);
+          timer.unref?.();
+          opts.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            resolve({ ok: false, http_status: 504, error_code: "worker_timeout", error: "aborted" });
+          }, { once: true });
+        });
+      },
+    }),
+  );
+  const slow = results.find((r) => r.errorCode === "worker_slow");
+  assert.ok(slow, "首字节来了就该记 worker_slow，而不是 worker_hang");
+  assert.equal(results.some((r) => r.errorCode === "worker_hang"), false);
+});
+
+// 对冲只在「头号一个字节都没来」时启动。首字节 2.7–5 秒就到了，说明上游在正常
+// 推流、只是慢 —— 这时再复制一份请求，等于白烧一张图的额度。
+test("no hedge is spawned once the first lane has received a first byte", async () => {
+  const accounts = [1, 2].map((n) => ({
+    email: `prog${n}@example.com`, password: "p", totp: seed, accessToken: jwt(3600, `prog${n}@example.com`),
+  }));
+  const seen = [];
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    maxTotalMs: 3_000,
+    attemptTimeoutMs: 2_000,
+    hedgeDelayMs: 100,
+    runWorker: async (payload, opts) => {
+      seen.push(payload.access_token);
+      opts.onProgress("first_byte");
+      await new Promise((r) => setTimeout(r, 400));
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  assert.equal(result.data.length, 1);
+  assert.equal(seen.length, 1, "头号已经在推流，第二路不该被拉起");
+});
+
+// 探索路是另一个诉求（去试没上过场的号），所以给独立开关：
+// 打开它，头号在推流时也会起第二路去探；关着（默认）就完全不复制。
+test("the explore lane can be re-enabled even while the head is progressing", async () => {
+  const accounts = [1, 2].map((n) => ({
+    email: `exp${n}@example.com`, password: "p", totp: seed, accessToken: jwt(3600, `exp${n}@example.com`),
+  }));
+  const seen = [];
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    maxTotalMs: 3_000,
+    attemptTimeoutMs: 2_000,
+    hedgeDelayMs: 100,
+    exploreAccounts: [accounts[1]],
+    allowExploreWhileProgressing: true,
+    runWorker: async (payload, opts) => {
+      seen.push(payload.access_token);
+      opts.onProgress("first_byte");
+      await new Promise((r) => setTimeout(r, seen.length === 1 ? 500 : 30));
+      return { ok: true, data: [{ b64_json: "AAAA" }] };
+    },
+  });
+  assert.equal(result.data.length, 1);
+  assert.equal(seen.length, 2, "开了探索开关就该去探第二个号");
+});
+
+// 被放弃的尝试以前完全不留痕 —— 上游可能已经生成了，等于白烧额度还查不到。
+test("an aborted lane is recorded as attempt_aborted instead of vanishing", async () => {
+  const accounts = [1, 2].map((n) => ({
+    email: `abor${n}@example.com`, password: "p", totp: seed, accessToken: jwt(3600, `abor${n}@example.com`),
+  }));
+  const results = [];
+  let firstSeen = 0;
+  await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    maxTotalMs: 3_000,
+    attemptTimeoutMs: 2_500,
+    hedgeDelayMs: 100,
+    onAccountResult: (e) => results.push(e),
+    runWorker: async (payload, opts) => {
+      if (firstSeen++ === 0) {
+        // 头号：一个字节都不来，等被掐。这样对冲会正常启动。
+        await new Promise((_, reject) => {
+          opts.signal.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          }, { once: true });
+        });
+      }
+      return { ok: true, data: [{ b64_json: "BBBB" }] };
+    },
+  });
+  // 被放弃的那一路是在后台异步上报的（它不该阻塞胜出的那一路），等一拍再看。
+  await new Promise((r) => setTimeout(r, 60));
+  const aborted = results.filter((r) => r.errorCode === "attempt_aborted");
+  assert.equal(aborted.length, 1, "被放弃的那一路要留一条记录");
+  assert.ok(results.some((r) => r.success === true), "另一路应该正常出图");
+});
+
 test("a client abort surfaces as AbortError, not a 503", async () => {
   const ctrl = new AbortController();
   const accounts = [{ email: "gone@example.com", password: "p", totp: seed, accessToken: jwt(3600, "gone@example.com") }];
@@ -1211,7 +1338,8 @@ test("an account that never sends an upstream byte is dropped at the hang thresh
     },
   });
   assert.equal(seen.length, 2, "the hung account must be dropped and the next one tried");
-  assert.equal(results[0].errorCode, "worker_timeout");
+  // 一个字节都没来 = worker_hang（真卡死），和「首字节来了但慢」要分开。
+  assert.equal(results[0].errorCode, "worker_hang");
   assert.match(results[0].errorMessage, /没有任何响应/);
   assert.equal(result.data.length, 1);
   assert(Date.now() - started < 2_000, "the hang must not cost the full attempt timeout");

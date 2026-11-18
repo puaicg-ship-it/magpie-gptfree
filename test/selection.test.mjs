@@ -271,19 +271,19 @@ test("consecutive hangs escalate 0 → 30min → 2h, and a success resets them",
   };
 
   // 第一次卡死：只记 streak，不隔离（可能只是上游抖一下）
-  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   assert.equal(store.state.accounts[tag].hangStreak, 1);
   assert.equal(store.state.accounts[tag].cooldownUntil, null, "一次卡死不该直接隔离");
   assert.equal(isAccountCoolingDown(email, store.state), false);
 
   // 第二次连续卡死：30 分钟
-  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   assert.equal(store.state.accounts[tag].hangStreak, 2);
   assert(Math.abs(coolFor() - 30) <= 1, `第二次应冷却 30 分钟，实际 ${coolFor()}`);
   assert.equal(isAccountCoolingDown(email, store.state), true);
 
   // 第三次：2 小时
-  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   assert.equal(store.state.accounts[tag].hangStreak, 3);
   assert(Math.abs(coolFor() - 120) <= 1, `第三次应冷却 2 小时，实际 ${coolFor()}`);
 
@@ -299,7 +299,7 @@ test("a later ordinary failure never shortens an existing hang isolation", async
   const email = "hangkeep@example.com";
   const tag = accountSlotTag(email);
   for (let i = 0; i < 3; i++) {
-    await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+    await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   }
   const isolated = Date.parse(store.state.accounts[tag].cooldownUntil);
   assert.ok(isolated - Date.now() > 100 * 60_000, "先被隔离 2 小时");
@@ -855,7 +855,7 @@ test("average latency and TTFB are smoothed per account without polluting failur
   assert.equal(store.state.accounts[tag].imageSamples, 2);
 
   // 失败样本没有可比耗时，不能污染均值。
-  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   assert.equal(store.state.accounts[tag].avgImageMs, 32000);
   assert.equal(store.state.accounts[tag].imageSamples, 2);
 
@@ -973,11 +973,11 @@ test("ewma success rate and hang streak are tracked without touching the death r
   await recordImageCall({ email, success: true, ms: 1000 }, { statsStore: store });
   assert.equal(store.state.accounts[tag].ewmaSuccess, 1, "首个成功样本直接是 1");
 
-  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   assert.equal(store.state.accounts[tag].ewmaSuccess, 0.7, "0.3 alpha：1 → 0.7");
   assert.equal(store.state.accounts[tag].hangStreak, 1);
 
-  await recordImageCall({ email, success: false, error: "worker_timeout" }, { statsStore: store });
+  await recordImageCall({ email, success: false, error: "worker_hang" }, { statsStore: store });
   assert.equal(store.state.accounts[tag].hangStreak, 2);
   assert.ok(store.state.accounts[tag].lastHangAt);
 

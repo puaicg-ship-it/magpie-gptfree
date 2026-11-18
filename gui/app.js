@@ -474,6 +474,9 @@
     unauthorized: "登录失效",
     request_timeout: "请求超时",
     timeout: "请求超时",
+    worker_hang: "上游无响应（卡死）",
+    worker_slow: "生图超时（慢）",
+    attempt_aborted: "尝试已放弃",
     worker_timeout: "生图超时（本地掐断）",
     worker_start_failed: "Worker 启动失败",
     worker_error: "Worker 调用失败",
@@ -499,7 +502,10 @@
   };
   // 鼠标悬停时给一句人话，不然只看到 worker_timeout 这种代号没法判断要不要处理。
   const ERROR_HINTS = {
-    worker_timeout: "本地 Python worker 在预算内没返回（默认单次 35 秒、整单 55 秒），多见于上游慢、号被限流或代理抖动；只记一次慢失败并自动换号，不判死",
+    worker_hang: "上游在 10 秒内一个字节都没返回 —— 这才是真卡死。连续 2 次隔离 30 分钟，3 次起 2 小时",
+    worker_slow: "上游首字节已经回来了，只是没在单次预算内出图。这是模型慢，不是号的错：只记一次普通失败，不累计卡死",
+    attempt_aborted: "这一路被主动放弃了（另一路已经出图，或整单到了预算上限）。上游那边可能已经生成，等于白烧一份额度",
+    worker_timeout: "老版本留下的错误码（0.12.2 起拆成 worker_hang / worker_slow）；只记一次慢失败并自动换号，不判死",
     worker_start_failed: "Python worker 起不来，通常是首次安装没装完或缺少依赖",
     dependencies_missing: "Python worker 依赖缺失，重装插件会自动补齐",
     output_too_large: "worker 输出超过上限，多为异常返回，重试一次通常就好",
