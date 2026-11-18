@@ -362,7 +362,7 @@
         const skipped = info.result?.invalid ?? 0;
         const providerCount = info.providerCount ?? added;
         if (info.providerConnected === true)
-          notice(`导入完成：本次新增/更新 ${added} 个账号（失败 ${failed}${skipped ? `，已跳过错误行 ${skipped}` : ""}），当前已有 ${providerCount} 个账号独立入驻 Magpie Providers`);
+          notice(`导入完成：本次新增/更新 ${added} 个账号（失败 ${failed}${skipped ? `，已跳过错误行 ${skipped}` : ""}），号池现有 ${providerCount} 个账号（Magpie 里仍是一条供应商记录）`);
         else if (info.providerConnected === false)
           notice(info.message || "账号已入池，但连接 Magpie 号池失败；请检查插件状态", true);
         else
@@ -413,7 +413,7 @@
       $("progressBox").scrollIntoView({ behavior: "smooth", block: "nearest" });
       stopPolling();
       await status();
-      notice("已开始后台 HTTP 批量登录；成功账号将逐个独立同步到 Magpie Providers 供多账号使用");
+      notice("已开始后台 HTTP 批量登录；成功的账号会并入号池 —— Magpie 里仍只有一条供应商记录，内部按额度自动轮换");
     } catch (err) {
       setBusy(false);
       hidden("progressBox", true);
@@ -1776,7 +1776,7 @@
       const res = await api("sync", {});
       await refreshData({ quiet: true });
       if (res.connected)
-        notice(`已将 ${res.count} 个账号分别同步到 Magpie Providers，可在 Providers 中独立勾选、设为首选与轮询`);
+        notice(`已同步：号池 ${res.count} 个账号，Magpie 里仍是一条供应商记录，内部按额度轮换`);
       else
         notice("当前号池暂无可用账号，已清理 Providers 中的空号池条目");
     } catch (err) {

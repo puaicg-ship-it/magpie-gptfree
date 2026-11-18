@@ -806,8 +806,11 @@ test("startGuiServer 前台重试失败后，后台守护在端口释放后自�
     // 旧 host 让出端口 —— 后台守护应当自己把服务捞起来，无需再手动调 startGuiServer。
     await new Promise((resolve) => blocker.close(resolve));
 
+    // 轮询预算要留够：全量跑时这个文件和其他测试文件并行，事件循环会被挤占，
+    // 2.4 秒（120×20ms）偶尔不够，表现为「只有全量跑才偶发失败」。
+    // 守护窗口本身是 5 秒，这里给 6 秒，断言强度不变。
     let recovered = false;
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 300; i++) {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/ui`);
         if (res.status === 200) { recovered = true; break; }

@@ -144,8 +144,11 @@ export const GPTFreeGuiPlugin = async (ctx, options) => {
 
 /**
  * Separate, multi-account access-token pool mode.
- * Every admitted vault account is synchronized to its own Magpie Providers
- * account row, allowing individual selection, preferred routing, and failover.
+ *
+ * 0.9.0 起是**单端点**：整个号池在 Magpie 里只占一条 Providers 记录
+ * （「GPTFree号池 (N 个账号)」），轮换、故障转移、额度加权全部由插件内部完成。
+ * 以前是每个号一条记录、让 Magpie 自己挑 —— 但它对我们这些号没有任何额度数据，
+ * 只能盲选，实测一次请求能重试到 19 次。
  */
 export const GPTFreePoolPlugin = async (ctx = {}) => {
   const connector = ensurePoolConnector(ctx);
@@ -185,8 +188,7 @@ export const GPTFreePoolPlugin = async (ctx = {}) => {
       // 容器里的 python worker 铺满（每个请求最多再起 2 个 lane）。
       maxConcurrency: 4,
       // Native Magpie prompt & file chooser; never opens an external website.
-      // Multi-account management stays enabled so every pooled account gets its
-      // own toggleable row in Magpie Providers.
+      // 单端点：号池只占一条记录，所以这里开的是「整池并发」而不是每号并发。
       methods: [nativeImportMethod({
         ...(connector ? { server: () => startGuiServer({ port: GUI_PORT, onPoolChange: () => sharedConnector?.sync() }) } : {}),
         syncPool: () => sharedConnector?.sync(),
