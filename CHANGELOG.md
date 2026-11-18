@@ -6,49 +6,72 @@
 
 ## [0.12.3] - 2026-11-18
 
-**「出图成功了，客户端还在等」：其实是两个不同的请求，其中一个是会话标题。**
+**桥把「不是画图的请求」也当成了画图：一次是会话标题，一次是客户端自己写的「请继续」。**
 
-### 症状
+两个症状同一天出现，根子是同一个：只要模型 id 是图片模型，桥就把最后一条 user 消息
+当画面描述丢给上游。但「打到图片模型」和「要画一张图」是两件事。
 
-14:34 之后，面板上能看见一次成功的出图，但客户端一直转圈；同时号池在不停地
-换新号生图，六分钟后客户端放弃。当天落盘 30 张图，客户端真正来取 `/img/` 的
-只有 11 张。
+### 症状一：面板上出图成功了，客户端还在转圈
 
-### 根因：模型判不了「这次调用想干什么」
+14:34 之后能看到一次成功出图，客户端却一直等；号池同时在不停换新号，六分钟后客户端
+放弃。当天落盘 30 张图，客户端真正来取 `/img/` 的只有 11 张。
 
-网关的调用记录（`/config/magpie/gateway-conversations/<日期>/*/turns.jsonl`）
-显示，同一个会话里有两类请求，**模型字段都是 `gpt-image2.6`**：
+网关的调用记录（`/config/magpie/gateway-conversations/<日期>/*/turns.jsonl`）显示，
+同一个会话里有两类请求，**模型字段都是 `gpt-image2.6`**：
 
-- **会话标题请求**：system 2KB（"Generate a concise, sentence-case title…"，
-  要一个 `{"isNewTopic","title"}` 的 JSON），user 是一条 `<session>…</session>`；
+- **会话标题请求**：system 2KB（"Generate a concise, sentence-case title…"，要一个
+  `{"isNewTopic","title"}` 的 JSON），user 是一条 `<session>…</session>`；
 - **agent 主回合**：system 38–43KB + tools 17–26KB。
 
-桥只看 `isImageModelId(model)`，于是把标题请求也当成画图：真去生图、花掉一个
-账号额度、返回 `![image](…)`，而客户端要的是 JSON —— 那张图没有任何客户端会
-来取。同时真正的 agent 回合在另一条 requestId 上换号换到超时，所以「图成功了」
-和「客户端还在等」同时成立。
+标题请求被当成画图：真去生图、花掉一个账号额度、返回 `![image](…)`，而客户端要的是
+JSON —— 那张图没有任何客户端会来取。真正的 agent 回合在另一条 requestId 上换号换到
+超时，所以「图成功了」和「客户端还在等」同时成立。
 
-### 改法
+**改法：标题快路。** 三条同时成立才走（宁可漏判，不误判）：没有 `tools` / `functions`；
+首条 system 短于 4KB（agent 回合是 38KB 起）；system 里同时出现 `title` 和
+`isNewTopic` / `sentence-case` / `JSON object`。命中就**不碰号池**，本地凑一个 3–7 个
+词的标题直接回 JSON。带图的请求排除（那是改图）。
+`MAGPIE_GPTFREE_BRIDGE_TITLE_FASTPATH=0` 可关。
 
-桥新增一条**标题快路**：三条同时成立才走（宁可漏判，不误判）——
+### 症状二：一台 Windows 客户端 100% 失败，同一时刻 Mac 全成功
 
-1. 请求里没有 `tools` / `functions`（agent 回合一定带）；
-2. 首条 system 存在且短于 4KB（agent 回合是 38KB 起）；
-3. system 里同时出现 `title` 和 `isNewTopic` / `sentence-case` / `JSON object`。
+两边请求形态几乎一样（`msgs=2`、`size=-`、`quality=-`、`stream=1`、`n=1`），模型也一样，
+甚至同一个出口 IP；只有网关 key 不同。21 次里 15 次失败 vs 10 次里 7 次成功。
 
-命中就**不碰号池**，本地凑一个 3–7 个词的标题直接回 JSON（中文按字截 18 字，
-西文按词截 6 个词），流式/非流式都支持。带图的请求直接排除（那是改图）。
+真因在 prompt 的**尾部**。Windows 那条是：
 
-`MAGPIE_GPTFREE_BRIDGE_TITLE_FASTPATH=0` 可关掉这条快路。
+```
+…</user_query>
+<system-reminder data-role="error-recovery">Network error occurred, please continue</system-reminder>
+<system-reminder data-role="error-recovery">First token timeout occurred… please continue where you left off.</system-reminder>
+<system-reminder data-role="error-recovery">Network error occurred, please continue</system-reminder>
+```
+
+Mac 的尾部是干净的 `…Soft bokeh sunlight glow, 8k.</user_query>`。
+
+于是形成**自锁**：失败一次 → 客户端把「网络错误，请继续」追加进 user 消息 → 重发 →
+图片模型收到的是一堆「请继续」而不是画面描述 → 画不出来 → 再失败 → 再追加一条。
+这就是用户看到的「提示词被拒」：它是循环的起点，之后再也出不来。
+
+**改法：只取 `<user_query>` 里的用户原话当画面描述。** 没有这个标签时退一步把
+`<system-reminder>…</system-reminder>` 块整段剥掉；剥完不足 8 字就原样用，宁可长一点
+也不要把 prompt 弄空。线上验证：同一形态 13866 字 → 66 字，**19.1 秒出图**（修复前
+60 秒超时 × 6 个号全挂）。
+
+### 顺手加的观测
+
+失败日志和成功日志都带上请求形态（`chars=原/清洗后`、`msgs`、`tools`、`size`、
+`quality`、`stream`、`n`），失败时再带 prompt 前 60 字；长 prompt（>2000 字）一进来就
+记头 200 / 尾 400。这两个症状都是靠这行日志才分辨出来的 —— 光看 `ms` 和 `ttfb`，
+「上游慢」「回了文本」「prompt 根本不是画面描述」三种情况长得一模一样。
 
 ### 没修的（留档）
 
-- 复杂 prompt 的 60 秒单账号预算仍可能不够（今天成功样本 17–42 秒，失败的
-  清一色卡满 60 秒）。
-- 网关会把插件返回的 SSE body 整体缓冲：直连 `127.0.0.1:3425` 实测，43 秒的
-  出图里只收到网关自己的 `: keepalive`，我们的 role 帧 / keepalive / content
-  全部在结束那一刻一次性到达。0.12.2 的 keepalive 只在插件内部有效，穿过网关
-  就失效 —— 这是「客户端等不到就重发」的放大器，改不了（在 magpie 那边）。
+- 复杂 prompt 的 60 秒单账号预算仍可能不够（成功样本 17–42 秒，失败的清一色卡满 60 秒）。
+- 网关会把插件返回的 SSE body 整体缓冲：直连 `127.0.0.1:3425` 实测，43 秒的出图里只收到
+  网关自己的 `: keepalive`，我们的 role 帧 / keepalive / content 全部在结束那一刻一次性
+  到达。0.12.2 的 keepalive 只在插件内部有效，穿过网关就失效 —— 这是「客户端等不到就
+  重发」的放大器，改不了（在 magpie 那边）。
 
 ## [0.12.2] - 2026-11-18
 
