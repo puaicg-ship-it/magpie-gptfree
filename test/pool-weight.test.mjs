@@ -269,8 +269,8 @@ test("policy defaults are inert, and unknown fields are dropped", async () => {
     assert.equal(policy.latencyWeightEnabled, false);
     assert.equal(policy.hangWeightEnabled, false);
     assert.equal(policy.exploreWhileProgressing, false, "默认不为探索复制一个会成功的请求");
-    assert.equal(policy.imageAttemptTimeoutMs, 55_000);
-    assert.equal(policy.imageSlowModels["gpt-image-2.6"], 75_000);
+    assert.equal(policy.imageAttemptTimeoutMs, 60_000);
+    assert.deepEqual(policy.imageSlowModels, {}, "默认不给任何模型开后门");
     assert.deepEqual(policy.textQuotaFeatures, []);
     assert.deepEqual(policy.tierWeights, { S: 1.15, A: 1, B: 0.85, C: 0.6 });
 
@@ -296,50 +296,28 @@ test("policy defaults are inert, and unknown fields are dropped", async () => {
   }
 });
 
-// 按模型给预算：gpt-image-2.6 实测正常 21–37 秒、尾部超 55 秒，
-// 用默认的 55 秒会把「慢」误判成「卡死」。
-test("heavy models get their own attempt budget", async () => {
+// 单账号 60 秒没出图就换号：号池里两百多个号，等一个慢号的机会成本比换一个更大。
+// 默认所有模型统一，需要放宽某个模型就填 imageSlowModels。
+test("every model gets 60s by default, and the per-model table can override it", async () => {
   const { resolveImageAttemptTimeout } = await import("../lib/pool-policy.mjs");
   const policy = DEFAULT_POOL_POLICY;
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-2"), 55_000);
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-2.6"), 75_000);
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-2.6-flare"), 75_000);
-  // 没见过的模型退回默认，不会因为查不到表就拿到 0
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-9"), 55_000);
-  assert.equal(resolveImageAttemptTimeout(policy, ""), 55_000);
-  assert.equal(resolveImageAttemptTimeout(null, "gpt-image-2.6"), 55_000);
+  assert.equal(policy.imageAttemptTimeoutMs, 60_000);
+  assert.deepEqual(policy.imageSlowModels, {}, "默认不给任何模型开后门");
+  for (const model of ["gpt-image-2", "gpt-image-2.6", "gpt-image-2.6-flare", "gpt-image-9", ""]) {
+    assert.equal(resolveImageAttemptTimeout(policy, model), 60_000, model || "(空)");
+  }
+  // 查不到策略也不能返回 0（0 会被当成「不限制」或「立刻超时」）
+  assert.equal(resolveImageAttemptTimeout(null, "gpt-image-2.6"), 60_000);
 
-  // 表里塞垃圾：非法模型名 / 越界值都要被丢掉，而不是让所有模型都变慢
+  // 需要时仍然可以给某个模型单独放宽；非法模型名 / 越界值被丢掉
   const saved = await writePoolPolicy({
     imageSlowModels: { "gpt-image-2.6": 999_999, "BAD MODEL": 75_000, "gpt-image-2": 20_000 },
   });
   assert.equal(saved.imageSlowModels["gpt-image-2.6"], 180_000, "夹到上限");
   assert.equal(saved.imageSlowModels["BAD MODEL"], undefined);
-  assert.equal(saved.imageSlowModels["gpt-image-2"], 20_000, "也可以把某个模型调快");
+  assert.equal(saved.imageSlowModels["gpt-image-2"], 20_000);
   assert.equal(resolveImageAttemptTimeout(saved, "gpt-image-2"), 20_000);
-});
-
-// 按模型给预算：gpt-image-2.6 实测正常 21–37 秒、尾部超 55 秒，
-// 用默认的 55 秒会把「慢」误判成「卡死」。
-test("heavy models get their own attempt budget", async () => {
-  const { resolveImageAttemptTimeout } = await import("../lib/pool-policy.mjs");
-  const policy = DEFAULT_POOL_POLICY;
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-2"), 55_000);
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-2.6"), 75_000);
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-2.6-flare"), 75_000);
-  // 没见过的模型退回默认，不会因为查不到表就拿到 0
-  assert.equal(resolveImageAttemptTimeout(policy, "gpt-image-9"), 55_000);
-  assert.equal(resolveImageAttemptTimeout(policy, ""), 55_000);
-  assert.equal(resolveImageAttemptTimeout(null, "gpt-image-2.6"), 55_000);
-
-  // 表里塞垃圾：非法模型名 / 越界值都要被丢掉，而不是让所有模型都变慢
-  const saved = await writePoolPolicy({
-    imageSlowModels: { "gpt-image-2.6": 999_999, "BAD MODEL": 75_000, "gpt-image-2": 20_000 },
-  });
-  assert.equal(saved.imageSlowModels["gpt-image-2.6"], 180_000, "夹到上限");
-  assert.equal(saved.imageSlowModels["BAD MODEL"], undefined);
-  assert.equal(saved.imageSlowModels["gpt-image-2"], 20_000, "也可以把某个模型调快");
-  assert.equal(resolveImageAttemptTimeout(saved, "gpt-image-2"), 20_000);
+  assert.equal(resolveImageAttemptTimeout(saved, "gpt-image-2.6"), 180_000);
 });
 
 test("env overrides win over the file, for emergency rollback", async () => {
