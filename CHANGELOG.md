@@ -4,6 +4,42 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.12.6] - 2026-11-19
+
+**轮转策略和额度巡检变成可配置的，并补了一层池级事件日志。**
+
+三件事，都是「把已有的能力暴露出来」，没有重写选号：
+
+### 轮转策略
+
+`policy.rotation.strategy` 三档，差别只在**首选号还算不算数**，权重体系
+（额度 / 分级 / EWMA / 延迟 / 卡死）完全不动：
+
+- `quotaFirst`（默认）—— 首选号权重不低于最高值一半时才领跑，等于 0.12.x 行为
+- `roundRobin` —— 不给首选号特权，起点靠轮转账本铺开
+- `preferred` —— 首选号无条件第一
+
+没暴露 `skipRateLimited`：我们的 blocked 桶本来就是「排到最后」而不是丢弃，
+再加一个「连限流号也往前排」的开关只会让人误停好号。
+
+### 巡检可配置
+
+`policy.sweep` 的 `enabled / intervalMinutes / limit / staleAfterMinutes` 取代了
+写死的 10 分钟 2 个号。改完立即重排定时器（`setInterval` 的周期定死在创建那刻，
+不重建就等于改了不生效）。
+
+### 池级事件日志
+
+新增 `lib/pool-events.mjs`：进程内 ring（默认 400 条，`MAGPIE_GPTFREE_POOL_EVENT_SIZE`
+可调），记 `sweep.run` / `sweep.error` / `policy.change` / `account.parked` /
+`account.released`，通过 `GET /api/logs` 读（支持 `since` / `kind` / `limit`）。
+和 `request-log` 的分工：那边记「一次请求试了谁」，这边记「池子发生了什么事」。
+
+脱敏沿用同一套：只写 slot tag，不写邮箱明文。
+
+测试 266 → 276，新增 10 个（事件 ring 的顺序/过滤/脱敏、策略归一化与夹取、
+三档策略的领跑行为、巡检开关与重排、`/api/logs` 与策略变更事件）。
+
 ## [0.12.5] - 2026-11-19
 
 **热更新时最后一次会话落盘可能丢：`close()` 没等写盘就返回了。**
