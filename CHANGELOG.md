@@ -4,6 +4,18 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.12.5] - 2026-11-19
+
+**热更新时最后一次会话落盘可能丢：`close()` 没等写盘就返回了。**
+
+会话文件（`gui-sessions.json`，存的是「重启后页面还能用」的 capability，不含账号数据）
+是链式异步写的，而 `close()` 是 `if (!server.listening) return;` —— 端口没在听时直接返回，
+后面的清理和落盘全跳过；即使端口在听，也没等 `savingSessions` 写完就返回。
+
+改法：`close()` 改成「在听才关端口」，并在返回前 `await savingSessions`，把待写的会话
+先落盘。顺带把重启测试里那段 2 秒轮询去掉，改成「`close()` 返回即读文件」——契约写清楚，
+不用再 sleep 等 rename。
+
 ## [0.12.4] - 2026-11-19
 
 **额度用尽的号没被停住：Free 套餐上限走的是 502，不是 429，池子把它当普通失败处理了。**
