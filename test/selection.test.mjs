@@ -756,6 +756,35 @@ test("an upstream rate limit starts a round even when the quota snapshot said ot
   assert.equal(store.state.accounts[tag].imageQuota, 0);
 });
 
+// 上游有时候只说「额度用完了」，不给重置时间。以前 limitedUntil 留 null，
+// 号靠 imageQuota=0 停住却不知道什么时候回来，只能等巡检重新问额度。
+test("a rate limit with no reset time gets a one-hour cool-down", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "rl-nonull@example.com";
+  const tag = accountSlotTag(email);
+  const before = Date.now();
+  await recordImageCall({
+    email, success: false, error: "upstream_quota_exceeded", rateLimited: true, retryAfter: null,
+  }, { statsStore: store });
+  const until = Date.parse(store.state.accounts[tag].limitedUntil);
+  assert.ok(Number.isFinite(until), "limitedUntil must be set even without a reset window");
+  const minutes = (until - before) / 60000;
+  assert.ok(minutes > 55 && minutes < 65, "fallback cool-down is about an hour, got " + minutes);
+  assert.equal(store.state.accounts[tag].imageQuota, 0);
+});
+
+test("an absurd reset window is clamped instead of parked for a month", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "rl-clamp@example.com";
+  const tag = accountSlotTag(email);
+  const before = Date.now();
+  await recordImageCall({
+    email, success: false, error: "quota_exhausted", rateLimited: true, retryAfter: 30 * 86400,
+  }, { statsStore: store });
+  const days = (Date.parse(store.state.accounts[tag].limitedUntil) - before) / 86400000;
+  assert.ok(days > 6.9 && days < 7.1, "cool-down is clamped to 7 days, got " + days);
+});
+
 // 文本流量以前完全不计账，统计页只看得见生图。现在分开记，但绝不能混进
 // successCalls/failCalls —— 那会让 never 判死规则认不出「画不了图的号」。
 test("text calls are counted separately and never pollute the image counters", async () => {

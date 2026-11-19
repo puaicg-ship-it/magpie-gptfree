@@ -1147,6 +1147,71 @@ test("a quota-exhausted 400 fails over to the next account instead of failing th
   assert.equal(events[1].success, true);
 });
 
+// python worker 把 Free 套餐上限认成 upstream_quota_exceeded 并回 502（它确实没拿到图）。
+// 以前这里只看 429，于是额度耗尽的号不清零额度、冷却完又被选中，每轮白撞一次。
+test("a quota-exhausted 502 from the worker fails over and parks the account", async () => {
+  const accounts = [1, 2].map((n) => ({
+    email: `q502-${n}@example.com`,
+    password: "p",
+    totp: seed,
+    accessToken: jwt(3600, `q502-${n}@example.com`),
+  }));
+  const seen = [];
+  const events = [];
+  const result = await executeWebImageGeneration({
+    accounts,
+    request: { model: IMAGE_MODEL_ID, prompt: "cat", n: 1 },
+    reauthenticate: async (a) => a,
+    onAccountResult: (evt) => { events.push(evt); },
+    runWorker: async (payload) => {
+      seen.push(payload.access_token);
+      if (seen.length === 1) {
+        return {
+          ok: false,
+          http_status: 502,
+          error_code: "upstream_quota_exceeded",
+          error: "你已达到 Free 套餐的图像生成请求上限。上限将在 3天 后重置，届时可创建更多图像。",
+        };
+      }
+      return { ok: true, data: [{ b64_json: "iVBORw0KGgo=" }] };
+    },
+  });
+
+  assert.equal(seen.length, 2, "the next account must be tried");
+  assert.equal(result.data.length, 1);
+  assert.equal(events[0].rateLimited, true, "upstream_quota_exceeded is a rate condition, not a plain failure");
+  assert.equal(events[0].errorCode, "upstream_quota_exceeded");
+  assert.equal(events[0].retryAfter, 3 * 86400, "day-based reset windows are parsed too");
+  assert.equal(events[1].success, true);
+});
+
+// 收紧额度正则之后的反向保护：请求本身超限（尺寸/长度）不是号的问题，
+// 既不能换号白烧额度，也不能把好号停掉。
+test("a request-side limit 400 is not mistaken for an exhausted quota", async () => {
+  const acc1 = { email: "sz1@example.com", password: "p", totp: seed, accessToken: jwt(3600, "sz1@example.com") };
+  const acc2 = { email: "sz2@example.com", password: "p", totp: seed, accessToken: jwt(3600, "sz2@example.com") };
+  let workerCalls = 0;
+
+  const res = await poolFetch(CODEX_BASE + "/images/generations", {
+    method: "POST",
+    body: JSON.stringify({ model: "gpt-image-2", prompt: "huge", size: "4096x4096" }),
+  }, {
+    read: async () => [acc1, acc2],
+    runWorker: async () => {
+      workerCalls++;
+      return {
+        ok: false,
+        http_status: 400,
+        error_code: "invalid_request",
+        error: "Image size limit exceeded: the maximum is 4096px",
+      };
+    },
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(workerCalls, 1, "a request-side error must not burn the remaining accounts");
+});
+
 test("a worker that never returns is cut by the hard budget", async () => {
   const accounts = [1, 2].map((n) => ({
     email: `h${n}@example.com`,
