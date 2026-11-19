@@ -41,6 +41,22 @@ async function harness(options = {}) {
   return { service, base, html, token, api, close: async () => service.close() };
 }
 
+test("tab panels are siblings, never nested (balanced <section> tags)", async () => {
+  const html = await readFile(new URL("../gui/dashboard.html", import.meta.url), "utf8");
+  const opens = (html.match(/<section\b/g) || []).length;
+  const closes = (html.match(/<\/section>/g) || []).length;
+  assert.equal(opens, closes, "section 开闭必须配对");
+  // 嵌套会让后一个面板变成前一个的子节点：前一个是 hidden 时，点它的页签就是一片空白。
+  // 0.12.7 就是这么坏的 —— 日志面板漏了一个 </section>，设置页整块被吞进隐藏的日志面板。
+  for (const match of html.matchAll(/<section id="(\w+)"[^>]*>/g)) {
+    const body = html.slice(match.index + match[0].length, html.indexOf("</section>", match.index));
+    assert(!body.includes("<section"), `${match[1]} 里嵌了另一个 section`);
+  }
+  for (const panel of ["overviewPanel", "livePanel", "imagesPanel", "logsPanel", "settingsPanel", "importPanel"]) {
+    assert(html.includes(`id="${panel}"`), `缺少面板 ${panel}`);
+  }
+});
+
 test("Magpie GUI manifest points to a real page, provider menu action and a loopback service", async () => {
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.magpie.name, "GPTFree号池");
