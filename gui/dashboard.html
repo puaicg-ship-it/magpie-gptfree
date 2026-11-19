@@ -369,6 +369,22 @@
             </span>
           </div>
           <p class="settings-hint" id="policyTextHint"></p>
+          <div class="settings-row policy-flags">
+            <label class="filter-field">轮转策略
+              <select id="policyStrategy" class="num-input" title="只决定「首选号还算不算数」，权重体系不变">
+                <option value="quotaFirst">按额度优先（首选号过门槛才领跑）</option>
+                <option value="roundRobin">纯轮转（不给首选号特权）</option>
+                <option value="preferred">首选号无条件第一</option>
+              </select>
+            </label>
+            <label class="inline-check"><input type="checkbox" id="policyRespectPreferred"> <span>首选号可领跑</span></label>
+          </div>
+          <div class="settings-row policy-flags">
+            <label class="inline-check"><input type="checkbox" id="policySweepEnabled"> <span>定时巡检额度</span></label>
+            <label class="filter-field">间隔（分钟） <input id="policySweepInterval" type="number" min="1" max="1440" class="num-input"></label>
+            <label class="filter-field">每轮查几个 <input id="policySweepLimit" type="number" min="1" max="50" class="num-input"></label>
+          </div>
+          <p class="settings-hint">巡检只查额度，不登录、不触发 MFA。改完间隔会立刻重排定时器。</p>
           <div class="settings-row">
             <label class="filter-field">S <input id="policyWeightS" type="number" step="0.05" min="0.05" max="5" class="num-input"></label>
             <label class="filter-field">A <input id="policyWeightA" type="number" step="0.05" min="0.05" max="5" class="num-input"></label>

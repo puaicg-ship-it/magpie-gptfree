@@ -3,7 +3,8 @@
  * GUI entry runs in the plugin-host and serves its own sandboxed page.
  * Primary import & management live in the left-sidebar page (GPTFree号池).
  */
-import { CODEX_BASE, discoverPoolModels, poolFetch, startQuotaSweep } from "./lib/codex-pool.mjs";
+import { CODEX_BASE, applySweepPolicy, discoverPoolModels, poolFetch } from "./lib/codex-pool.mjs";
+import { DEFAULT_POOL_POLICY, readPoolPolicy } from "./lib/pool-policy.mjs";
 import { GUI_PORT, startGuiServer } from "./lib/gui-service.mjs";
 import {
   createPoolConnector, isLegacyPoolName, POOL_DISPLAY_NAME, POOL_MARKER, POOL_PROVIDER,
@@ -152,11 +153,13 @@ export const GPTFreeGuiPlugin = async (ctx, options) => {
  */
 export const GPTFreePoolPlugin = async (ctx = {}) => {
   const connector = ensurePoolConnector(ctx);
-  // 账号状态确认：每 10 分钟挑 2 个「额度快照过期」的号问一次额度。
+  // 账号状态确认：定时挑几个「额度快照过期」的号问一次额度。
   // 池子闲着的时候快照会一直停在上一次，而选号完全靠这份快照 —— 不巡检就是盲选。
   // 只查额度：不登录、不触发 MFA，失败静默。宿主里只会有一个定时器（有守卫）。
+  // 间隔/数量/开关都从策略文件读，面板改完立即重排（见 /api/policy）。
   try {
-    startQuotaSweep();
+    const { policy } = await readPoolPolicy().catch(() => ({ policy: DEFAULT_POOL_POLICY }));
+    applySweepPolicy(policy);
   } catch {
     // 巡检起不来不能挡住插件加载。
   }

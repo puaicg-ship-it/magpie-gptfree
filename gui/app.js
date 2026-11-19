@@ -933,6 +933,14 @@
     $("policyInflight").value = String(
       policy.perAccountImageInflight === undefined ? 1 : policy.perAccountImageInflight,
     );
+    // 轮转策略 / 巡检：缺字段时按默认值显示，别让旧版设置文件把面板显示成空的。
+    const rotation = policy.rotation || {};
+    $("policyStrategy").value = rotation.strategy || "quotaFirst";
+    $("policyRespectPreferred").checked = rotation.respectPreferredSlot !== false;
+    const sweep = policy.sweep || {};
+    $("policySweepEnabled").checked = sweep.enabled !== false;
+    $("policySweepInterval").value = String(sweep.intervalMinutes ?? 10);
+    $("policySweepLimit").value = String(sweep.limit ?? 2);
 
     host.replaceChildren();
     const observed = Array.isArray(policyState.observedFeatures) ? policyState.observedFeatures : [];
@@ -992,6 +1000,22 @@
     };
     const inflight = Number($("policyInflight").value);
     if (Number.isFinite(inflight)) body.perAccountImageInflight = Math.max(0, Math.min(8, Math.round(inflight)));
+    // 策略决定谁领跑；巡检决定多久问一次额度。两者都在 /api/policy 里落盘。
+    body.rotation = {
+      strategy: $("policyStrategy").value,
+      respectPreferredSlot: $("policyRespectPreferred").checked,
+    };
+    const sweepInterval = Number($("policySweepInterval").value);
+    const sweepLimit = Number($("policySweepLimit").value);
+    body.sweep = {
+      enabled: $("policySweepEnabled").checked,
+      ...(Number.isFinite(sweepInterval)
+        ? { intervalMinutes: Math.max(1, Math.min(1440, Math.round(sweepInterval))) }
+        : {}),
+      ...(Number.isFinite(sweepLimit)
+        ? { limit: Math.max(1, Math.min(50, Math.round(sweepLimit))) }
+        : {}),
+    };
     try {
       const result = await api("policy", body);
       policyState = { ...policyState, policy: result.policy };

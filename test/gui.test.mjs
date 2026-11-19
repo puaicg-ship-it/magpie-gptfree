@@ -5,6 +5,7 @@ import { createInMemoryStatsStore, recordImageCall, recordQuotaCheck } from "../
 import { IMAGE_ERROR_LOG_MAX_LIMIT, appendImageErrorLog } from "../lib/image-error-log.mjs";
 import { accountSlotTag, formatAccountSlotLabel } from "../lib/pool-connection.mjs";
 import { clearRequestLog, recordRequest } from "../lib/request-log.mjs";
+import { clearPoolEvents } from "../lib/pool-events.mjs";
 import { newBatchId, recordBatch } from "../lib/batch-registry.mjs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -567,6 +568,44 @@ test("GUI 账号池有搜索 / 分组 / 排序 / 常驻批量栏，Token 徽章�
     assert(!app.includes("innerHTML"));
     assert(!app.includes("localStorage"));
   } finally { await h.close(); }
+});
+
+test("pool events surface through /api/logs and policy writes are logged", async () => {
+  const applied = [];
+  const home = await mkdtemp(join(tmpdir(), "gptfree-events-"));
+  const prevHome = process.env.MAGPIE_GPTFREE_HOME;
+  // 策略写的是 settings.json，必须指到临时目录，别动真实号池的配置。
+  process.env.MAGPIE_GPTFREE_HOME = home;
+  const h = await harness({
+    poolRead: async () => [],
+    statsStore: createInMemoryStatsStore(),
+    applySweep: (policy) => { applied.push(policy.sweep); return null; },
+  });
+  try {
+    clearPoolEvents();
+    const saved = await h.api("policy", {
+      rotation: { strategy: "roundRobin" },
+      sweep: { enabled: false, intervalMinutes: 30 },
+    });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.json.policy.rotation.strategy, "roundRobin");
+    assert.equal(saved.json.policy.sweep.intervalMinutes, 30);
+    assert.equal(applied.length, 1, "touching sweep reschedules the timer");
+    assert.equal(applied[0].enabled, false);
+
+    const logs = await h.api("logs");
+    assert.equal(logs.status, 200);
+    const change = logs.json.events.find((e) => e.kind === "policy.change");
+    assert(change, "the policy write is in the event log");
+    assert.equal(change.strategy, "roundRobin");
+    assert(change.keys.includes("rotation"));
+    assert.equal(logs.json.pid, process.pid);
+  } finally {
+    await h.close();
+    if (prevHome === undefined) delete process.env.MAGPIE_GPTFREE_HOME;
+    else process.env.MAGPIE_GPTFREE_HOME = prevHome;
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("GUI keeps a page usable across a plugin-host restart (persisted capability)", async () => {
