@@ -24,6 +24,7 @@
           <button type="button" role="tab" class="tab active" aria-selected="true" data-tab="stats">总览 <span id="poolCount" class="count">0</span></button>
           <button type="button" role="tab" class="tab" aria-selected="false" data-tab="images">图片 <span id="imageCount" class="count">0</span></button>
           <button type="button" role="tab" class="tab" aria-selected="false" data-tab="live">运行</button>
+          <button type="button" role="tab" class="tab" aria-selected="false" data-tab="logs">日志</button>
           <button type="button" role="tab" class="tab" aria-selected="false" data-tab="settings">设置</button>
         </div>
         <button id="goImport" type="button" class="btn primary nav-import" title="粘贴账号文本或选择 TXT 文件，批量导入并自动授权入池">+ 导入账号</button>
@@ -310,6 +311,86 @@
         </div>
       </section>
 
+      <section id="logsPanel" class="panel hidden" role="tabpanel">
+        <p class="intro">池事件、请求尝试、生图失败、清理记录按时间排在一起。<strong>池事件</strong>与<strong>请求</strong>是进程内 ring，重启即清；<strong>生图错误</strong>与<strong>清理</strong>落盘，只留最近 500 条。</p>
+
+        <div class="section-head">
+          <h2>全部日志</h2>
+          <div class="head-side">
+            <span class="muted tiny" id="logsInfo">…</span>
+            <label class="filter-field">来源
+              <select id="logsSource" class="num-input">
+                <option value="">全部</option>
+                <option value="pool">池事件</option>
+                <option value="request">请求</option>
+                <option value="image">生图错误</option>
+                <option value="cleanup">清理</option>
+              </select>
+            </label>
+            <label class="inline-check"><input type="checkbox" id="logsOnlyFail"> <span>只看失败</span></label>
+            <button id="logsRefresh" type="button" class="btn quiet small">刷新</button>
+          </div>
+        </div>
+        <div class="table-wrap cleanup-log-wrap">
+          <table class="pool-table cleanup-table">
+            <colgroup>
+              <col class="col-log-time"><col class="col-log-trigger"><col class="col-log-trigger"><col>
+            </colgroup>
+            <thead>
+              <tr><th>时间</th><th>来源</th><th>账号</th><th>摘要</th></tr>
+            </thead>
+            <tbody id="logsRows"></tbody>
+          </table>
+        </div>
+        <p class="footnote">四路数据按时间倒序合并，最多显示 300 条。池事件与请求是本进程内存里的（重启清空；热更新时新旧 host 各记各的），生图错误与清理落盘在 <code>~/.magpie-gptfree/</code>。账号一律显示槽位号，不出现邮箱明文。</p>
+
+        <div class="section-head with-top">
+          <h2>清理日志</h2>
+          <div class="head-side">
+            <span class="muted tiny" id="cleanupLogInfo">自动清理与手动删除都会记一条，只留最近 500 条</span>
+            <button id="cleanupLogRefresh" type="button" class="btn quiet small">刷新</button>
+            <button id="cleanupLogClear" type="button" class="btn quiet small danger-text">清空日志</button>
+          </div>
+        </div>
+        <div class="table-wrap cleanup-log-wrap">
+          <table class="pool-table cleanup-table">
+            <colgroup>
+              <col class="col-log-time"><col class="col-log-trigger"><col class="col-log-num">
+              <col class="col-log-num"><col class="col-log-num"><col>
+            </colgroup>
+            <thead>
+              <tr>
+                <th>时间</th><th>触发方式</th><th>删除</th><th>释放</th><th>失败</th><th>参数</th>
+              </tr>
+            </thead>
+            <tbody id="cleanupLogRows"></tbody>
+          </table>
+        </div>
+        <p class="footnote">日志只记数量、释放空间和触发方式，不记文件名与账号信息；文件在 <code>~/.magpie-gptfree/cleanup-log.jsonl</code>。</p>
+
+        <div class="section-head with-top">
+          <h2>生图错误日志</h2>
+          <div class="head-side">
+            <span class="muted tiny" id="imageErrorLogInfo">每个账号失败都会记一条，只留最近 500 条</span>
+            <button id="imageErrorLogRefresh" type="button" class="btn quiet small">刷新</button>
+            <button id="imageErrorLogClear" type="button" class="btn quiet small danger-text">清空日志</button>
+          </div>
+        </div>
+        <div class="table-wrap cleanup-log-wrap">
+          <table class="pool-table cleanup-table">
+            <colgroup>
+              <col class="col-log-time"><col><col class="col-log-trigger"><col class="col-log-num"><col>
+            </colgroup>
+            <thead>
+              <tr>
+                <th>时间</th><th>账号 / 整单</th><th>错误码</th><th>状态</th><th>耗时与上游原文</th>
+              </tr>
+            </thead>
+            <tbody id="imageErrorLogRows"></tbody>
+          </table>
+        </div>
+        <p class="footnote">只记失败、不记成功。账号用槽位号（<code>s</code> + 邮箱哈希前 10 位），不落邮箱明文；上游原文会先去掉 token / 邮箱 / 链接再截断。<strong>整单</strong>那行是一次请求的汇总：试了几个号 / 池子一共几个号，小字「N 个号没轮到」说明 55 秒预算在它们身上没来得及用。<strong>状态</strong>列左边是我们返回给客户端的码，右边小字是上游<em>真实</em>返回的码 —— 上游 200 + 一段文字时两者不一样。文件在 <code>~/.magpie-gptfree/image-errors.jsonl</code>。</p>
+
       <section id="settingsPanel" class="panel hidden" role="tabpanel">
         <div class="section-head overview-head">
           <div>
@@ -407,52 +488,7 @@
           </div>
         </article>
 
-        <div class="section-head with-top">
-          <h2>清理日志</h2>
-          <div class="head-side">
-            <span class="muted tiny" id="cleanupLogInfo">自动清理与手动删除都会记一条，只留最近 500 条</span>
-            <button id="cleanupLogRefresh" type="button" class="btn quiet small">刷新</button>
-            <button id="cleanupLogClear" type="button" class="btn quiet small danger-text">清空日志</button>
-          </div>
-        </div>
-        <div class="table-wrap cleanup-log-wrap">
-          <table class="pool-table cleanup-table">
-            <colgroup>
-              <col class="col-log-time"><col class="col-log-trigger"><col class="col-log-num">
-              <col class="col-log-num"><col class="col-log-num"><col>
-            </colgroup>
-            <thead>
-              <tr>
-                <th>时间</th><th>触发方式</th><th>删除</th><th>释放</th><th>失败</th><th>参数</th>
-              </tr>
-            </thead>
-            <tbody id="cleanupLogRows"></tbody>
-          </table>
-        </div>
-        <p class="footnote">日志只记数量、释放空间和触发方式，不记文件名与账号信息；文件在 <code>~/.magpie-gptfree/cleanup-log.jsonl</code>。</p>
-
-        <div class="section-head with-top">
-          <h2>生图错误日志</h2>
-          <div class="head-side">
-            <span class="muted tiny" id="imageErrorLogInfo">每个账号失败都会记一条，只留最近 500 条</span>
-            <button id="imageErrorLogRefresh" type="button" class="btn quiet small">刷新</button>
-            <button id="imageErrorLogClear" type="button" class="btn quiet small danger-text">清空日志</button>
-          </div>
-        </div>
-        <div class="table-wrap cleanup-log-wrap">
-          <table class="pool-table cleanup-table">
-            <colgroup>
-              <col class="col-log-time"><col><col class="col-log-trigger"><col class="col-log-num"><col>
-            </colgroup>
-            <thead>
-              <tr>
-                <th>时间</th><th>账号 / 整单</th><th>错误码</th><th>状态</th><th>耗时与上游原文</th>
-              </tr>
-            </thead>
-            <tbody id="imageErrorLogRows"></tbody>
-          </table>
-        </div>
-        <p class="footnote">只记失败、不记成功。账号用槽位号（<code>s</code> + 邮箱哈希前 10 位），不落邮箱明文；上游原文会先去掉 token / 邮箱 / 链接再截断。<strong>整单</strong>那行是一次请求的汇总：试了几个号 / 池子一共几个号，小字「N 个号没轮到」说明 55 秒预算在它们身上没来得及用。<strong>状态</strong>列左边是我们返回给客户端的码，右边小字是上游<em>真实</em>返回的码 —— 上游 200 + 一段文字时两者不一样。文件在 <code>~/.magpie-gptfree/image-errors.jsonl</code>。</p>
+        <p class="footnote with-top">清理日志和生图错误日志已合并到 <button id="goLogs" type="button" class="btn quiet small">日志</button> 页。</p>
       </section>
 
       <section id="importPanel" class="panel hidden" role="tabpanel">

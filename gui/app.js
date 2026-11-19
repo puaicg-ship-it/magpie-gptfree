@@ -2362,6 +2362,154 @@
     }
   }
 
+  // ---------- 日志页：四路数据合成一条时间轴 ----------
+  // 为什么合并：排查时的问题是「14:34 那一刻发生了什么」，不是「生图错误里有什么」。
+  // 四份日志各有各的存储和字段，界面上先归一成 {at, source, who, ok, text}，再按时间
+  // 倒序排；原始条目塞进 title，需要细节时悬停就能看全。
+  const LOG_SOURCE_TEXT = { pool: "池事件", request: "请求", image: "生图错误", cleanup: "清理" };
+  const LOG_SOURCE_CLASS = { pool: "neutral", request: "neutral", image: "bad", cleanup: "warn" };
+  const LOG_POOL_TEXT = {
+    "sweep.run": "巡检完成",
+    "sweep.error": "巡检失败",
+    "policy.change": "策略变更",
+    "account.parked": "账号被停",
+    "account.released": "账号放回",
+  };
+  let logState = null;
+  let logsLoading = false;
+
+  async function loadLogs() {
+    if (logsLoading) return;
+    logsLoading = true;
+    const info = $("logsInfo");
+    if (info) info.textContent = "正在读取…";
+    try {
+      const [pool, requests, image, cleanup] = await Promise.all([
+        api("logs?limit=200").catch((err) => ({ error: err.message })),
+        api("requests?limit=200").catch((err) => ({ error: err.message })),
+        api("image-errors?limit=200").catch((err) => ({ error: err.message })),
+        api("images/cleanup-log?limit=200").catch((err) => ({ error: err.message })),
+      ]);
+      logState = { pool, requests, image, cleanup };
+      renderLogs();
+    } finally {
+      logsLoading = false;
+    }
+  }
+
+  function poolEventText(event) {
+    const head = LOG_POOL_TEXT[event.kind] || event.kind;
+    const bits = [];
+    if (event.reason) bits.push(event.reason);
+    if (typeof event.count === "number") bits.push(`${event.count} 个`);
+    if (event.until) bits.push(`停到 ${formatShortTime(event.until)}`);
+    if (event.strategy) bits.push(`→ ${event.strategy}`);
+    if (Array.isArray(event.keys) && event.keys.length) bits.push(event.keys.join("、"));
+    return bits.length ? `${head}：${bits.join(" · ")}` : head;
+  }
+
+  /** 四路数据归一成同一种行：什么时候、哪来的、哪个号、成没成、一句话摘要。 */
+  function logRows() {
+    const rows = [];
+    for (const event of logState?.pool?.events || []) {
+      rows.push({
+        at: event.at,
+        source: "pool",
+        who: event.tag || "",
+        // 池事件里只有 sweep.error 是失败；其余是「发生了什么」，不算错。
+        ok: event.ok !== false && !String(event.kind).endsWith(".error"),
+        text: poolEventText(event),
+        raw: event,
+      });
+    }
+    for (const entry of logState?.requests?.items || []) {
+      const bits = [entry.kind === "text" ? "文本" : "生图"];
+      if (entry.model) bits.push(entry.model);
+      if (entry.code) bits.push(entry.code);
+      if (entry.status) bits.push(String(entry.status));
+      if (typeof entry.ms === "number") bits.push(`${entry.ms}ms`);
+      if (entry.reason) bits.push(entry.reason);
+      rows.push({ at: entry.at, source: "request", who: entry.tag || "", ok: entry.ok === true, text: bits.join(" · "), raw: entry });
+    }
+    for (const entry of logState?.image?.items || []) {
+      const bits = [entry.kind === "request" ? "整单" : "单号"];
+      if (entry.code) bits.push(entry.code);
+      if (entry.status) bits.push(String(entry.status));
+      if (entry.message) bits.push(String(entry.message).slice(0, 120));
+      rows.push({
+        at: entry.at,
+        source: "image",
+        who: entry.tag || entry.email || "",
+        ok: false,
+        text: bits.join(" · "),
+        raw: entry,
+      });
+    }
+    for (const entry of logState?.cleanup?.items || []) {
+      rows.push({
+        at: entry.at,
+        source: "cleanup",
+        who: "",
+        ok: !(entry.failed > 0),
+        text: `${CLEANUP_TRIGGER_TEXT[entry.trigger] || entry.trigger} · 删除 ${entry.deleted ?? 0}`
+          + ` · 释放 ${entry.bytes ? formatBytes(entry.bytes) : "—"}`
+          + (entry.failed ? ` · 失败 ${entry.failed}` : ""),
+        raw: entry,
+      });
+    }
+    return rows.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  }
+
+  function renderLogs() {
+    const body = $("logsRows");
+    if (!body) return;
+    const source = $("logsSource")?.value || "";
+    const onlyFail = $("logsOnlyFail")?.checked === true;
+    const all = logRows();
+    const rows = all.filter((row) => (!source || row.source === source) && (!onlyFail || !row.ok));
+
+    const info = $("logsInfo");
+    if (info) {
+      const failedSources = [
+        ["pool", logState?.pool],
+        ["request", logState?.requests],
+        ["image", logState?.image],
+        ["cleanup", logState?.cleanup],
+      ].filter(([, value]) => value?.error).map(([key]) => LOG_SOURCE_TEXT[key]);
+      const base = rows.length < all.length
+        ? `共 ${all.length} 条，筛后 ${rows.length} 条`
+        : `共 ${all.length} 条`;
+      info.textContent = failedSources.length
+        ? `${base} · ${failedSources.map((key) => LOG_SOURCE_TEXT[key]).join("/")} 读取失败`
+        : base;
+    }
+
+    body.replaceChildren();
+    if (!rows.length) {
+      const row = el("tr", "empty-row");
+      const cell = el("td", "", all.length
+        ? "当前筛选下没有记录。"
+        : "还没有日志。等巡检跑一次、或发一个请求之后再来看看。");
+      cell.colSpan = 4;
+      row.append(cell);
+      body.append(row);
+      return;
+    }
+    for (const item of rows.slice(0, 300)) {
+      const row = el("tr");
+      const time = el("td", "log-time", formatShortTime(item.at));
+      time.title = item.at;
+      const src = el("td", "");
+      src.append(el("span", "pill " + (LOG_SOURCE_CLASS[item.source] || "neutral"),
+        LOG_SOURCE_TEXT[item.source] || item.source));
+      const who = el("td", "log-num", item.who || "—");
+      const text = el("td", "log-args", item.text);
+      text.title = JSON.stringify(item.raw).slice(0, 900);
+      row.append(time, src, who, text);
+      body.append(row);
+    }
+  }
+
   /** 原文列：请求汇总那行把耗时和「没轮到」摆在前面，光看错误码看不出这两件事。 */
   function errorLogMessageText(entry) {
     const bits = [];
@@ -2991,6 +3139,7 @@
     hidden("overviewPanel", next !== "stats");
     hidden("importPanel", next !== "import");
     hidden("livePanel", next !== "live");
+    hidden("logsPanel", next !== "logs");
     hidden("imagesPanel", next !== "images");
     hidden("settingsPanel", next !== "settings");
     // 导入页没有对应的 tab —— 它是导航右侧那个按钮。这里给按钮加个「正在这里」的圈，
@@ -2999,11 +3148,13 @@
     // 图片页 / 设置页的数据量跟账号页无关，切过去才拉
     //（服务端有 30 秒目录缓存，重复切不贵）。
     if (next === "images") loadImages();
-    if (next === "settings") {
+    // 日志页：时间轴（四路合一）+ 两张明细表（生图错误、清理），一起拉。
+    if (next === "logs") {
+      loadLogs();
       loadCleanupLog();
       loadImageErrorLog();
-      loadPolicy();
     }
+    if (next === "settings") loadPolicy();
     // 运行页每 2 秒轮询一次，切走必须立刻停，否则会在后台一直打本地服务。
     if (next === "live") startLive();
     else stopLive();
@@ -3294,6 +3445,12 @@
       loadImageErrorLog();
     });
     $("imageErrorLogClear")?.addEventListener("click", clearImageErrorLog);
+    // 日志页：时间轴刷新 + 两个筛选（来源 / 只看失败）。筛在本地做，不重新请求 ——
+    // 四路数据已经全在手上，切筛选还打一次服务端纯属浪费。
+    $("logsRefresh")?.addEventListener("click", () => { void loadLogs(); });
+    $("logsSource")?.addEventListener("change", renderLogs);
+    $("logsOnlyFail")?.addEventListener("change", renderLogs);
+    $("goLogs")?.addEventListener("click", () => tab("logs"));
     // 拖动框选：按住某一行（或某张卡片）往下/往上划过一片就连续选中（像文件管理器）。
     // 重绘会换掉鼠标下的节点，所以只在选择真的变了时才重绘，否则会打转。
     // 挂在外层容器上、用 [data-name] 找目标：列表的行和网格的卡片都带这个属性。
