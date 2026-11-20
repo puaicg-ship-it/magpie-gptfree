@@ -259,6 +259,28 @@ test("three consecutive failures open a cooldown that a success clears", async (
   assert.equal(isAccountCoolingDown(email, store.state), false);
 });
 
+// 上游 1663508 的修复同步：429 不带 retry_after 时也得停得住，原因还得留在行上。
+// 以前 quotaError 那行是 `error ? prev.quotaError : prev.quotaError` —— 两个分支
+// 完全一样，等于什么都没做，一被限流原因就被 null 盖掉，面板说不清为什么停放。
+test("a 429 without retry_after still parks the account and keeps the reason", async () => {
+  const store = createInMemoryStatsStore();
+  const email = "limited@example.com";
+  const tag = accountSlotTag(email);
+  const message = "图像生成请求上限已达，将在 23小时 后重置";
+
+  await recordImageCall(
+    { email, success: false, rateLimited: true, error: "rate_limited", errorMessage: message },
+    { statsStore: store },
+  );
+
+  const entry = store.state.accounts[tag];
+  const until = Date.parse(entry.limitedUntil || "");
+  assert(Number.isFinite(until), "没有 retry_after 也必须写入 limitedUntil，否则这个号会被一直排在最前面");
+  const hours = (until - Date.now()) / 3_600_000;
+  assert(hours > 0.9 && hours < 1.1, `兜底冷却应为 1 小时，实际 ${hours.toFixed(2)} 小时`);
+  assert.equal(entry.quotaError, message, "停放原因必须保留，否则面板解释不了这个号为什么被停");
+});
+
 // 0.12.1：卡死改成按「连续卡死次数」升级的独立阶梯，不再「按两次失败计 + 固定 5 分钟」。
 // 5 分钟太短：一个真卡死的号一小时能回来捣乱十几次，每次白烧掉整条 lane 的预算。
 test("consecutive hangs escalate 0 → 30min → 2h, and a success resets them", async () => {
