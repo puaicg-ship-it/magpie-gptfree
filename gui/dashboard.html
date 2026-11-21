@@ -528,7 +528,29 @@
         <div class="toolbar">
           <button id="checkPaste" type="button" class="btn secondary">检查账号格式</button>
           <button id="clearPaste" type="button" class="btn secondary">清空输入</button>
+          <button id="oauthLogin" type="button" class="btn secondary" title="不需要密码：在浏览器里登录一次 ChatGPT 账号，授权后自动入池">浏览器登录单个账号</button>
           <label class="inline-check"><input type="checkbox" id="skipInvalid"> <span>跳过格式错误行，仅导入有效账号</span></label>
+        </div>
+
+        <div id="oauthPanel" class="options-panel hidden">
+          <div class="oauth-head">
+            <strong>浏览器登录（无需密码）</strong>
+            <span id="oauthState" class="muted tiny">准备中…</span>
+          </div>
+          <p class="footnote">在浏览器里登录 ChatGPT 并同意授权，token 会直接存进本地加密号池。本机弹不出窗口时，把下面链接复制到任意浏览器（含手机或远程机器）打开，再把跳转后的地址粘回第二行即可。</p>
+          <div class="oauth-row">
+            <input id="oauthUrl" type="text" readonly spellcheck="false" autocomplete="off" aria-label="授权链接">
+            <button id="oauthOpen" type="button" class="btn secondary">打开浏览器</button>
+            <button id="oauthCopy" type="button" class="btn secondary">复制链接</button>
+          </div>
+          <div class="oauth-row">
+            <input id="oauthCallback" type="text" spellcheck="false" autocomplete="off" placeholder="回调没自动回来时，把 http://localhost:1455/auth/callback?code=... 粘到这里">
+            <button id="oauthSubmit" type="button" class="btn primary">提交回调</button>
+          </div>
+          <div class="actions">
+            <button id="oauthCancel" type="button" class="btn danger">取消授权</button>
+            <span class="muted tiny" id="oauthHint">授权有效期 10 分钟；完成后这个账号会立刻出现在列表里。</span>
+          </div>
         </div>
 
         <div class="options-panel">

@@ -3215,6 +3215,128 @@
       setBusy(busy);
     });
     $("skipInvalid").addEventListener("change", () => setBusy(busy));
+
+    // ---------- 浏览器 OAuth 登录 ----------
+    // 前端只轮询状态、转交粘贴回来的回调；token 从服务端直接进 vault，不经过页面。
+    let oauthPoll = null;
+    let oauthId = "";
+    const OAUTH_STATE_TEXT = {
+      waiting: "等待浏览器授权…",
+      exchanging: "正在换取 token…",
+    };
+    function stopOAuthPoll() {
+      if (oauthPoll) { clearInterval(oauthPoll); oauthPoll = null; }
+    }
+    function setOAuthState(text, isError = false) {
+      const el = $("oauthState");
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = isError ? "var(--danger)" : "";
+    }
+    function settleOAuth(ok, message) {
+      stopOAuthPoll();
+      oauthId = "";
+      setOAuthState(message, !ok);
+      if (ok) {
+        notice(message);
+        refreshData({ quiet: true }).catch(() => {});
+      }
+    }
+    function pollOAuth() {
+      if (!oauthId) { stopOAuthPoll(); return; }
+      api("oauth/status").then((snap) => {
+        if (!snap?.active) return;
+        if (snap.id && snap.id !== oauthId) return; // 被新的一条授权顶掉了
+        const state = snap.state;
+        if (OAUTH_STATE_TEXT[state]) { setOAuthState(OAUTH_STATE_TEXT[state]); return; }
+        if (state === "done") {
+          const label = snap.accountLabel || "账号";
+          const plan = snap.planType ? `（${snap.planType}）` : "";
+          $("oauthUrl").value = "";
+          $("oauthCallback").value = "";
+          settleOAuth(true, `已入池：${label}${plan}`);
+          hidden("oauthPanel", true);
+        } else if (state === "failed") {
+          settleOAuth(false, snap.error || "授权失败，请重试");
+        } else if (state === "canceled") {
+          settleOAuth(false, "已取消授权");
+        }
+      }).catch(() => {});
+    }
+    $("oauthLogin").addEventListener("click", async () => {
+      const button = $("oauthLogin");
+      button.disabled = true;
+      hidden("oauthPanel", false);
+      setOAuthState("正在生成授权链接…");
+      $("oauthUrl").value = "";
+      $("oauthCallback").value = "";
+      try {
+        const res = await api("oauth/start", {
+          open: true,
+          proxy: $("proxyInput").value.trim(),
+        });
+        oauthId = res.id || "";
+        $("oauthUrl").value = res.url || "";
+        // 回调监听没起来不是死路：链接照样能用，只是要手动粘回来。
+        const blocked = res.callbackBlocked === "busy"
+          ? "本机 1455 端口被占用：请复制链接到浏览器打开，再手动粘贴回调"
+          : res.callbackBlocked === "reserved"
+            ? "系统不允许监听 1455 端口：请复制链接到浏览器打开，再手动粘贴回调"
+            : "";
+        if (blocked) setOAuthState(blocked, true);
+        else if (res.openError) setOAuthState(`没能自动打开浏览器：${res.openError}`, true);
+        else setOAuthState(OAUTH_STATE_TEXT.waiting);
+        stopOAuthPoll();
+        oauthPoll = setInterval(pollOAuth, 1500);
+      } catch (err) {
+        setOAuthState(err.message, true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    $("oauthOpen").addEventListener("click", async () => {
+      try {
+        await api("oauth/open", {});
+      } catch (err) {
+        setOAuthState(err.message, true);
+      }
+    });
+    $("oauthCopy").addEventListener("click", async () => {
+      const value = $("oauthUrl").value;
+      if (!value) return setOAuthState("还没有授权链接，先点「浏览器登录」", true);
+      try {
+        await navigator.clipboard.writeText(value);
+        setOAuthState("授权链接已复制");
+      } catch {
+        // 沙箱 iframe 里剪贴板可能被拒：退化成选中文本让用户自己复制。
+        $("oauthUrl").select();
+        setOAuthState("已选中链接，请按 Ctrl/Cmd+C 复制");
+      }
+    });
+    $("oauthSubmit").addEventListener("click", async () => {
+      const callback = $("oauthCallback").value.trim();
+      if (!callback) return setOAuthState("请先粘贴浏览器跳转后的完整回调链接", true);
+      setOAuthState("正在校验回调…");
+      try {
+        const snap = await api("oauth/callback", { callback });
+        if (snap?.state === "done") {
+          const label = snap.accountLabel || "账号";
+          $("oauthUrl").value = "";
+          $("oauthCallback").value = "";
+          settleOAuth(true, `已入池：${label}`);
+          hidden("oauthPanel", true);
+        } else {
+          setOAuthState(snap?.error || "回调未被接受，请检查链接是否完整", true);
+        }
+      } catch (err) {
+        setOAuthState(err.message, true);
+      }
+    });
+    $("oauthCancel").addEventListener("click", async () => {
+      try { await api("oauth/cancel", {}); } catch {}
+      settleOAuth(false, "已取消授权");
+      hidden("oauthPanel", true);
+    });
     // 导入页和总览页的代理框互相同步：填一次两边都生效。
     $("proxyInput").addEventListener("input", () => {
       $("poolProxyInput").value = $("proxyInput").value;

@@ -1220,3 +1220,137 @@ test("an account without batch info falls back to the legacy batch", async () =>
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── 浏览器 OAuth 登录接口 ────────────────────────────────────────────────────
+// 全部注入假流程：测试进程不监听 1455、不联网、不往 home 写批次。
+function fakeOAuthFlow(captured) {
+  let state = "waiting";
+  let finish;
+  const done = new Promise((resolve) => { finish = resolve; });
+  const flow = {
+    id: "flow-test-1",
+    url: "https://auth.openai.com/oauth/authorize?state=abc&code_challenge=xyz",
+    redirectUri: "http://localhost:1455/auth/callback",
+    callbackListening: true,
+    callbackBlocked: "",
+    status: () => ({ id: flow.id, state, accountLabel: state === "done" ? "o***@example.com" : "", error: "" }),
+    async submitCallback(raw) {
+      if (raw === "bad") {
+        const err = new Error("回调链接与当前授权会话不匹配（state 不一致）");
+        err.status = 400;
+        throw err;
+      }
+      // 真实流程在这一步落库：这里照着做一遍，才能验到 batchId 有没有传对。
+      await captured.save({
+        email: "oauth@example.com", password: "", totp: "",
+        accessToken: future(), refreshToken: "rt_from_oauth",
+      });
+      state = "done";
+      finish({ id: flow.id, state: "done", accountLabel: "o***@example.com" });
+      return flow.status();
+    },
+    wait: (signal) => {
+      // 真流程会响应 abort（取消时立刻收端口）。假流程必须照做，否则
+      // /api/oauth/cancel 会一直挂着把测试进程拖死。
+      if (!signal) return done;
+      if (signal.aborted) {
+        state = "canceled";
+        return Promise.resolve({ id: flow.id, state: "canceled" });
+      }
+      return new Promise((resolve) => {
+        const onAbort = () => {
+          state = "canceled";
+          resolve({ id: flow.id, state: "canceled" });
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        done.then((value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        });
+      });
+    },
+  };
+  return flow;
+}
+
+test("浏览器登录：起流程 → 轮询状态 → 粘贴回调 → 入池", async () => {
+  const captured = { save: null, flow: null, opened: [] };
+  const h = await harness({
+    poolRead: async () => [],
+    statsStore: createInMemoryStatsStore(),
+    oauthStart: async (options) => {
+      captured.save = options.save;
+      captured.onComplete = options.onComplete;
+      captured.flow = fakeOAuthFlow(captured);
+      return captured.flow;
+    },
+    oauthOpen: (url) => captured.opened.push(url),
+    poolSave: async (record, opts) => { captured.saved = { record, opts }; },
+    probeQuota: async () => ({ ok: true, imageQuota: 3 }),
+  });
+  try {
+    const started = await h.api("oauth/start", { open: true });
+    assert.equal(started.status, 200);
+    assert.match(started.json.url, /^https:\/\/auth\.openai\.com\//);
+    assert.equal(started.json.callbackListening, true);
+    assert.equal(captured.opened.length, 1, "open:true 应该真的去打开浏览器");
+
+    const waiting = await h.api("oauth/status");
+    assert.equal(waiting.json.active, true);
+    assert.equal(waiting.json.state, "waiting");
+
+    const bad = await h.api("oauth/callback", { callback: "bad" });
+    assert.equal(bad.status, 400, "state 不匹配的回调要拒掉");
+    assert.match(bad.json.error || "", /state/);
+
+    const ok = await h.api("oauth/callback", {
+      callback: "http://localhost:1455/auth/callback?code=abc&state=abc",
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.json.state, "done");
+
+    // 落库必须带 batchId，否则新号会被归进「历史批次」。
+    assert.equal(captured.saved.record.email, "oauth@example.com");
+    assert.equal(captured.saved.record.refreshToken, "rt_from_oauth");
+    assert.ok(captured.saved.opts.batchId, "OAuth 入池要单独记一个批次");
+
+    const after = await h.api("oauth/status");
+    assert.equal(after.json.state, "done");
+  } finally {
+    await h.close();
+  }
+});
+
+test("浏览器登录：没有进行中的授权时拒绝回调，取消后状态归零", async () => {
+  const captured = { opened: [] };
+  const h = await harness({
+    poolRead: async () => [],
+    statsStore: createInMemoryStatsStore(),
+    oauthStart: async (options) => {
+      captured.save = options.save;
+      return fakeOAuthFlow(captured);
+    },
+    oauthOpen: (url) => captured.opened.push(url),
+    poolSave: async () => {},
+  });
+  try {
+    const none = await h.api("oauth/callback", { callback: "x" });
+    assert.equal(none.status, 409, "没有流程在跑时不能接回调");
+
+    await h.api("oauth/start", {});
+    assert.equal(captured.opened.length, 0, "没传 open 就不该擅自开浏览器");
+
+    const opened = await h.api("oauth/open", {});
+    assert.equal(opened.status, 200);
+    assert.equal(captured.opened.length, 1);
+
+    const canceled = await h.api("oauth/cancel", {});
+    assert.equal(canceled.status, 200);
+    assert.equal(canceled.json.state, "canceled");
+
+    const idle = await h.api("oauth/status");
+    assert.equal(idle.json.active, false);
+  } finally {
+    await h.close();
+  }
+});

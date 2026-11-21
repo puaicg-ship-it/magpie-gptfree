@@ -4,6 +4,66 @@
 新功能与修复进 patch。每个版本打 `v<version>` tag，Magpie 里看的是 commit，界面页脚和
 `/api/health` 里的 `version` 才是这个号。
 
+## [0.12.10] - 2026-11-21
+
+**续期从「拿密码重登」换成「用 refresh_token 换」。顺带把上游的浏览器 OAuth 登录搬过来。**
+
+这版做两件事，但它们其实是同一件事的两半：一个解决「token 过期了怎么续」，一个解决
+「没有密码的号怎么进池」。
+
+**第一半：refresh_token 续期。**
+
+`pool-vault.mjs` 从 0.9.0 起刻意**不存** refresh_token，只存 access token 加邮箱密码
+和 2FA 密钥，靠密码反复重登来续期。代价有两个：每次过期都要跑一遍 Python 登录流程
+（几秒起步，还要装 venv），而且密码必须落库。
+
+更亏的是，登录后端**本来就返回了 refresh_token** —— `dsh-http-auth.mjs` 的
+`normalizeWorkerResult` 里那行 `refresh: String(parsed.refresh_token || "")` 一直都在，
+只是 `importer.mjs` 只取了 `access`、把 `refresh` 扔了。TXT 解析也一样：第五列被认出来
+是 refresh token（`hasRefreshToken: true`），值却没带出来。README 里「5 段结尾附
+refresh_token，优先复用、过期自动重登」这句话，代码其实一直没做到。
+
+现在：`upsertPool` 持久化 `refreshToken`（可选字段，老记录读出空串，不写回文件），
+`renewAccount` 优先走 `refreshCodexToken`，失败再降级到密码登录。轮换后的新
+refresh_token **立刻写回** —— 这是本模块唯一的硬约定，不写回下次必挂。
+
+**判死语义要跟着改，而且不能机械改。** refresh 失败分三种，处理方式完全不同：
+
+| 情况 | 处理 | 是否算账号失效 |
+| --- | --- | --- |
+| 网络/上游临时故障 | 直接抛出，让上层重试 | 不算 |
+| `invalid_grant`，但有密码 | 静默降级走密码登录 | 不算 |
+| `invalid_grant`，且没有密码 | 抛 `reauth_required` | **算** |
+
+所以 `AUTH_ERROR` 里加的是 `reauth_required`，**不是** `invalid_grant` —— 后者只是中间
+过程，把有密码的好号算进「已失效」是误杀。有密码的号根本不会把 refresh 的失败抛到
+账本上，它在 `renewAccount` 内部就被密码路径接住了。
+
+`renewAccount` 的 refresh 分支仍然要调 `verify`，不能为了快省掉：`discoverPoolModels`
+靠注入的 `verify` 顺手把模型列表捞回来，跳过一次验证模型发现就静默失效。
+
+**第二半：浏览器 OAuth 登录。**
+
+移植上游 `a8ca17a` 的 `lib/web-oauth.mjs`（Codex OAuth PKCE，client
+`app_EMoamEEZ73f0CkXaXp7hrann`，回调 `http://localhost:1455/auth/callback`）。用途不是
+「导入已授权的号」，而是反过来 —— 在**没有任何凭证**的情况下，用浏览器登录一次造出一份：
+带 `offline_access` 所以能拿 refresh_token，支持把授权链接复制到别的浏览器/远程机器，
+再把回调粘回来。存进 vault 的号 `password` 为空，靠 refresh 续期。
+
+面板入口在导入页的工具栏「浏览器登录单个账号」。四个接口：`oauth/start`、
+`oauth/status`（轮询）、`oauth/callback`（粘回调）、`oauth/cancel`。同一时刻只跑一条
+授权 —— 两条会抢 1455 端口，state 也会串。回调监听起不来（端口占用/系统不允许）不是
+死路：链接照样能用，只是要手动粘回来。
+
+**已知限制**：refresh_token 会轮换。两个进程同时续同一个号时，后完成的那个拿着旧
+token 会被上游拒（`invalid_grant`），有密码的号能自动降级救回来，纯 OAuth 号只能重新
+授权。进程内靠 `pendingAuth` + `authQueue` 串行化，跨进程没有锁 —— 和 README 里
+「不要同时跑两个导入」是同一条约束。
+
+测试从 278 个加到 300 个：续期优先级、轮换写回、三种失败分支、判死只认
+`reauth_required`、TXT 第五列取值、PKCE/state 校验、以及 OAuth 四个接口的完整走一遍
+（注入假流程，不监听端口、不联网）。
+
 ## [0.12.9] - 2026-11-20
 
 **限流之后账本记不住「为什么被停」：`quotaError` 那行是个空操作。**

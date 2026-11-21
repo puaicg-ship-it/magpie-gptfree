@@ -128,6 +128,13 @@ button:disabled { opacity: .5; cursor: not-allowed }
 .inline-check { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text); cursor: pointer; margin-left: auto }
 .inline-check input { accent-color: var(--accent); width: 15px; height: 15px }
 .options-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line) }
+/* 浏览器 OAuth 登录：授权链接要能整段读出来复制，所以输入框可横向滚动而不是截断。 */
+.oauth-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px }
+.oauth-head strong { font-size: 13px }
+.oauth-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 9px }
+.oauth-row input { flex: 1; min-width: 260px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); color: var(--text); font: 12px/1.5 ui-monospace, "Cascadia Code", "Consolas", monospace }
+.oauth-row input:focus { border-color: var(--accent); outline: none }
+.oauth-row .btn { flex-shrink: 0 }
 .proxy-label { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 12px }
 .proxy-label span { font-weight: 620; color: var(--text); white-space: nowrap }
 #proxyInput, .pool-proxy { flex: 1; min-width: 240px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); color: var(--text); font-size: 12px }
